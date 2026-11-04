@@ -6,7 +6,7 @@
 #   sudo ./deploy/install.sh --aec        # 额外安装 PipeWire 并启用 WebRTC 回声消除
 #
 # 可覆盖的变量：
-#   SERVICE_USER=pi WHISPER_MODEL=ggml-small.bin sudo -E ./deploy/install.sh
+#   SERVICE_USER=ubuntu WHISPER_MODEL=ggml-small.bin sudo -E ./deploy/install.sh
 
 set -euo pipefail
 
@@ -46,9 +46,36 @@ warn() { printf '\033[1;33m!!!\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31mxxx\033[0m %s\n' "$*" >&2; exit 1; }
 
 [[ $EUID -eq 0 ]] || die "请用 sudo 运行"
-SERVICE_USER="${SERVICE_USER:-${SUDO_USER:-root}}"
+
+# 运行用户：显式指定 > sudo 的原始用户 > 第一个普通用户（uid >= 1000）。
+# 注意：Raspberry Pi OS Bookworm 起不再创建默认的 pi 用户，Ubuntu 默认是 ubuntu。
+if [[ -z "${SERVICE_USER:-}" ]]; then
+    if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+        SERVICE_USER="$SUDO_USER"
+    else
+        SERVICE_USER="$(awk -F: '$3 >= 1000 && $3 < 65534 && $7 !~ /(nologin|false)$/ { print $1; exit }' /etc/passwd)"
+    fi
+fi
+
+if [[ -z "${SERVICE_USER:-}" ]]; then
+    die "无法确定运行用户。请显式指定，例如：sudo SERVICE_USER=ubuntu ./deploy/install.sh"
+fi
+
+if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
+    die "用户 $SERVICE_USER 不存在。
+
+Raspberry Pi OS Bookworm 起不再默认创建 pi 用户（用户名是装机时自己设的），
+Ubuntu 22.04 默认用户是 ubuntu。当前系统里的普通用户：
+$(awk -F: '$3 >= 1000 && $3 < 65534 { printf "  %-16s uid %s\n", $1, $3 }' /etc/passwd)
+
+请重跑：sudo SERVICE_USER=<用户名> $0"
+fi
+
 SERVICE_UID="$(id -u "$SERVICE_USER")"
-[[ "$SERVICE_USER" == "root" ]] && warn "将以 root 运行服务；建议 SERVICE_USER=pi 指定普通用户"
+log "服务运行用户: $SERVICE_USER (uid $SERVICE_UID)"
+[[ "$SERVICE_USER" == "root" ]] && warn "将以 root 运行服务；建议换成普通用户，例如 sudo SERVICE_USER=$(awk -F: '$3 >= 1000 && $3 < 65534 { print $1; exit }' /etc/passwd)"
+
+getent group audio >/dev/null || warn "系统没有 audio 组，systemd 单元的 Group=audio 会启动失败（把单元里的 Group=audio 删掉）"
 
 [[ "$(uname -m)" == "aarch64" ]] || warn "当前架构是 $(uname -m)，本脚本面向 aarch64"
 

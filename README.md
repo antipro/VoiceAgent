@@ -180,9 +180,21 @@ WHISPER_MODEL=ggml-tiny.bin ./scripts/fetch-models.sh
 
 ```bash
 git clone <repo> xiaomeng && cd xiaomeng
-sudo SERVICE_USER=pi ./deploy/install.sh --build          # 不含 AEC
-sudo SERVICE_USER=pi ./deploy/install.sh --build --aec    # 含 PipeWire + WebRTC AEC
+sudo ./deploy/install.sh --build          # 不含 AEC
+sudo ./deploy/install.sh --build --aec    # 含 PipeWire + WebRTC AEC
 ```
+
+脚本会自动把服务用户设成 `sudo` 的原始用户（也就是你登录的账号），并校验它存在。
+需要换成别的账号时显式指定：
+
+```bash
+sudo SERVICE_USER=ubuntu ./deploy/install.sh --build
+```
+
+> **关于用户名**：`pi` 是 2022 年以前 Raspberry Pi OS 的默认用户。
+> 现在的 **Bookworm 及以后不再创建 `pi`**，用户名是装机时在 Imager 里自己设的；
+> **Ubuntu 22.04 默认是 `ubuntu`**。用错用户名时脚本会直接报错并列出本机可用用户，
+> 不会生成一个起不来的 systemd 单元。
 
 脚本会：装系统依赖 → 编译 whisper.cpp → 安装 Piper 与中文语音 → 下载模型 →
 写 `/etc/xiaomeng/config.toml` 与 `/etc/xiaomeng/xiaomeng.env` → 安装并启用 systemd 服务。
@@ -203,7 +215,7 @@ journalctl -u xiaomeng -f
 ```bash
 rustup target add aarch64-unknown-linux-gnu
 cargo install cross          # 需要 Docker
-./scripts/build-pi.sh pi@raspberrypi.local
+./scripts/build-pi.sh <用户名>@raspberrypi.local
 ```
 
 > `Cross.toml` 已经为 cpal 装好了目标架构的 `libasound2-dev`。
@@ -361,7 +373,8 @@ CREATE INDEX IF NOT EXISTS idx_chat_history_session
 | 蓝牙音质差/断连 | 用 5GHz WiFi，或改用 USB 蓝牙 dongle；2.4GHz 与 A2DP 容易互相干扰 |
 | `xiaomeng-aec --check` 报没有 echo-cancel 节点 | 耳机没连/没切到 HFP；或 `library.name` 没写；`journalctl --user -u pipewire -n 50` |
 | AEC 开了但还是自唤醒 | 播放没走 echo-cancel sink；`pactl get-default-sink` 必须是 `echo-cancel-sink` |
-| 系统服务里没有音频设备 | 单元缺少 `XDG_RUNTIME_DIR=/run/user/<uid>`，或没 `loginctl enable-linger pi` |
+| 系统服务里没有音频设备 | 单元缺少 `XDG_RUNTIME_DIR=/run/user/<uid>`，或没 `loginctl enable-linger <用户名>` |
+| `systemctl status` 报 `Failed to determine user credentials` | `SERVICE_USER` 写成了不存在的用户（例如新系统上的 `pi`），用 `sudo SERVICE_USER=$(whoami) ./deploy/install.sh` 重来 |
 
 ---
 
