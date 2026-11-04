@@ -28,7 +28,7 @@ Rust + Tokio 实现，蓝牙麦克风/音箱走 ALSA / cpal，对话记录落 SQ
 | 随时打断 | 唤醒代际（`watch<u64>`）广播，LLM 请求、TTS 合成、音频播放都会被立即取消 |
 | Tool Calling 闭环 | 原生 OpenAI 兼容实现，最多 3 轮，搜索失败会回传给模型而不是崩溃 |
 | SQLite 会话记录 | 表结构见第 8 节，使用 WAL 模式，阻塞调用走 `spawn_blocking` |
-| 交叉编译 | 提供 `Cross.toml` 与 `scripts/build-pi.sh`，但**推荐在 Pi 上原生编译**（见第 6 节） |
+| 交叉编译 | 提供 Docker（目标系统内编译，推荐）与 `cross`（可选）两条路，见 6.3 |
 
 **两个刻意的工程取舍**（与原始规格的差异）：
 
@@ -66,6 +66,7 @@ src/
   tts/             Piper 子进程封装
 deploy/
   install.sh       树莓派一键安装（依赖、引擎、模型、systemd、可选 AEC）
+  Dockerfile.build Mac 上用于产出与 Pi 一致的 aarch64 二进制
   xiaomeng.service
   asound.conf      ALSA / 蓝牙路由示例
   pipewire/        PipeWire WebRTC AEC 配置（0.3.48 语法）
@@ -210,17 +211,51 @@ sudo systemctl restart xiaomeng
 journalctl -u xiaomeng -f
 ```
 
-### 6.3 从 Mac 交叉编译
+### 6.3 编译：Pi 上原生 vs Mac 上交叉
+
+先澄清 `--build` 的含义：它是**在树莓派本机**执行 `cargo build --release`，
+不是交叉编译。三条路对比如下：
+
+| 方式 | 命令 | 速度 | 风险 |
+| --- | --- | --- | --- |
+| Docker 里用 Ubuntu 22.04/arm64 编译（推荐） | `./scripts/build-pi.sh` | Apple Silicon 上原生速度 | 无 glibc 问题 |
+| Pi 上原生编译 | `sudo ./deploy/install.sh --build` | Pi 4 约 5~10 分钟 | 需要在 Pi 上装 Rust |
+| `cross` 交叉编译 | `./scripts/build-pi.sh --cross` | 最快 | 镜像 glibc 可能比目标新 |
+
+**① Docker（推荐）**
+
+```bash
+./scripts/build-pi.sh                              # 只构建
+./scripts/build-pi.sh <用户名>@<树莓派地址>          # 构建 + scp + 远程重启
+```
+
+首次会构建 `deploy/Dockerfile.build`（Ubuntu 22.04 + arm64 + Rust，约 1GB）。
+产物是 `target/linux-arm64/release/xiaomeng`，和 Pi 上的系统库版本完全一致。
+Intel Mac 上 Docker 会走 QEMU，能编但慢，建议改用 Pi 原生编译。
+
+**② Pi 上原生编译**
+
+```bash
+# Pi 上先装 Rust（只需一次）
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+# 然后
+sudo ./deploy/install.sh --build
+```
+
+`install.sh --build` 只是调用 `cargo build --release` 并把产物装到 `/opt/xiaomeng`；
+Pi 上没有 `cargo` 时脚本会直接报错并给出安装命令。
+
+**③ `cross`（可选）**
 
 ```bash
 rustup target add aarch64-unknown-linux-gnu
 cargo install cross          # 需要 Docker
-./scripts/build-pi.sh <用户名>@raspberrypi.local
+./scripts/build-pi.sh --cross <用户名>@<树莓派地址>
 ```
 
-> `Cross.toml` 已经为 cpal 装好了目标架构的 `libasound2-dev`。
-> 但 cross 镜像的 glibc 版本必须 **小于等于** 目标系统的 2.35，否则 Pi 上会报
-> `GLIBC_2.xx not found`。遇到就改用 Pi 原生编译（`--build`），别在这上面耗时间。
+`Cross.toml` 已经为 cpal 装好了目标架构的 `libasound2-dev`。但 cross 镜像基于的
+Debian 版本决定了产物的 glibc：**必须 ≤ 目标系统的 glibc**（Ubuntu 22.04 是 2.35）。
+比目标新就会在 Pi 上报 `GLIBC_2.36 not found`，这时换 ① 或 ②，别在镜像上耗时间。
 
 ### 6.4 蓝牙与 ALSA
 

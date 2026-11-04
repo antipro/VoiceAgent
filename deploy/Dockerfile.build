@@ -1,0 +1,31 @@
+# 用于在 Mac 上产出「和树莓派完全一致」的 aarch64 二进制。
+#
+# 关键点：直接在 Ubuntu 22.04 容器里编译，而不是用交叉工具链。
+# 这样 glibc、libasound 都是目标系统的版本，不会出现 GLIBC_2.36 not found。
+#
+# Apple Silicon 上 --platform linux/arm64 是原生速度；
+# Intel Mac 上会被 QEMU 模拟，能跑但慢，建议改用 Pi 上原生编译。
+#
+# 构建：docker build --platform linux/arm64 -t xiaomeng-builder:22.04 deploy/
+# 使用：见 scripts/build-pi.sh
+
+FROM --platform=linux/arm64 ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        pkg-config \
+        libasound2-dev \
+        ca-certificates \
+        curl \
+        git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Ubuntu 22.04 自带的 rustc 是 1.66，太旧（cpal 0.18 需要 1.85+），用 rustup。
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain stable --no-modify-path
+ENV PATH=/root/.cargo/bin:$PATH
+
+# 源码在运行时挂载进来，这个镜像只用一次构建、多次复用。
+WORKDIR /app
