@@ -3,6 +3,7 @@
 #
 #   sudo ./deploy/install.sh              # 安装依赖、whisper.cpp、piper、模型、systemd
 #   sudo ./deploy/install.sh --build      # 额外在本机执行 cargo build --release
+#   sudo ./deploy/install.sh --aec        # 额外安装 PipeWire 并启用 WebRTC 回声消除
 #
 # 可覆盖的变量：
 #   SERVICE_USER=pi WHISPER_MODEL=ggml-small.bin sudo -E ./deploy/install.sh
@@ -24,7 +25,21 @@ VOICE_URL="https://huggingface.co/rhasspy/piper-voices/resolve/main/zh/zh_CN/hua
 MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
 
 BUILD=0
-[[ "${1:-}" == "--build" ]] && BUILD=1
+AEC=0
+for arg in "$@"; do
+    case "$arg" in
+        --build) BUILD=1 ;;
+        --aec) AEC=1 ;;
+        --help | -h)
+            sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *)
+            echo "未知参数: $arg" >&2
+            exit 2
+            ;;
+    esac
+done
 
 log() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!!\033[0m %s\n' "$*" >&2; }
@@ -32,6 +47,7 @@ die() { printf '\033[1;31mxxx\033[0m %s\n' "$*" >&2; exit 1; }
 
 [[ $EUID -eq 0 ]] || die "请用 sudo 运行"
 SERVICE_USER="${SERVICE_USER:-${SUDO_USER:-root}}"
+SERVICE_UID="$(id -u "$SERVICE_USER")"
 [[ "$SERVICE_USER" == "root" ]] && warn "将以 root 运行服务；建议 SERVICE_USER=pi 指定普通用户"
 
 [[ "$(uname -m)" == "aarch64" ]] || warn "当前架构是 $(uname -m)，本脚本面向 aarch64"
@@ -42,6 +58,20 @@ apt-get update
 apt-get install -y --no-install-recommends \
     build-essential cmake git curl ca-certificates pkg-config \
     libasound2-dev libgomp1 sox alsa-utils
+
+if [[ $AEC -eq 1 ]]; then
+    log "安装 PipeWire 音频栈（Ubuntu 22.04 没有 pipewire-audio 元包）"
+    apt-get install -y --no-install-recommends \
+        pipewire pipewire-pulse pipewire-alsa wireplumber \
+        libpipewire-0.3-modules libspa-0.2-modules pulseaudio-utils
+    # 让 PipeWire 在用户不登录时也常驻（系统服务要用它的 socket）。
+    loginctl enable-linger "$SERVICE_USER"
+    install -Dm644 "$(dirname "$0")/pipewire/51-xiaomeng-aec.conf" \
+        /etc/pipewire/pipewire.conf.d/51-xiaomeng-aec.conf
+    install -m0755 "$(dirname "$0")/../scripts/setup-aec.sh" /usr/local/bin/xiaomeng-aec
+    warn "AEC 配置已写入，但必须等蓝牙耳机连上后再加载模块："
+    warn "  sudo -u $SERVICE_USER XDG_RUNTIME_DIR=/run/user/$SERVICE_UID xiaomeng-aec"
+fi
 
 log "创建目录"
 install -d "$APP_DIR" "$MODEL_DIR" "$CONF_DIR" "$DATA_DIR"
@@ -109,6 +139,13 @@ fi
 # ---------------------------------------------------------------- 配置
 if [[ ! -f "$CONF_DIR/config.toml" ]]; then
     log "写入 $CONF_DIR/config.toml"
+    if [[ $AEC -eq 1 ]]; then
+        DEVICE_LINES='# PipeWire 的 ALSA PCM；默认 source/sink 由 setup-aec.sh 指向 echo-cancel。
+input_device = "pipewire"
+output_device = "pipewire"'
+    else
+        DEVICE_LINES='# 留空 = 系统默认设备。'
+    fi
     cat > "$CONF_DIR/config.toml" <<EOF
 [assistant]
 name = "小蒙同学"
@@ -128,6 +165,7 @@ words = ["小蒙同学", "小蒙", "小萌同学", "小萌", "小明同学"]
 
 [audio]
 backend = "cpal"
+$DEVICE_LINES
 playback_volume = 1.0
 
 [asr]
@@ -174,6 +212,7 @@ chown -R "$SERVICE_USER":"$SERVICE_USER" "$DATA_DIR" "$APP_DIR"
 # ---------------------------------------------------------------- systemd
 log "安装 systemd 服务"
 sed -e "s|__USER__|$SERVICE_USER|g" \
+    -e "s|__UID__|$SERVICE_UID|g" \
     -e "s|__APP_DIR__|$APP_DIR|g" \
     -e "s|__CONF_DIR__|$CONF_DIR|g" \
     "$(dirname "$0")/xiaomeng.service" > /etc/systemd/system/xiaomeng.service
@@ -185,6 +224,9 @@ log "完成。"
 echo
 echo "下一步："
 echo "  1. sudo nano $CONF_DIR/xiaomeng.env   # 填入 DEEPSEEK_API_KEY / TAVILY_API_KEY"
+if [[ $AEC -eq 1 ]]; then
+    echo "  1b. 连好蓝牙耳机后启用 AEC：sudo -u $SERVICE_USER XDG_RUNTIME_DIR=/run/user/$SERVICE_UID xiaomeng-aec"
+fi
 echo "  2. speaker-test -c 2 -t wav           # 确认蓝牙音箱可用"
 echo "  3. arecord -d 3 /tmp/t.wav && aplay /tmp/t.wav   # 确认麦克风"
 echo "  4. sudo systemctl start xiaomeng && journalctl -u xiaomeng -f"

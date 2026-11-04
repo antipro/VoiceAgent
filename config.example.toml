@@ -25,10 +25,16 @@ fuzzy_max_len = 8
 # cpal：真实声卡；stdin：开发机手动输入。
 backend = "cpal"
 # 留空/注释掉 = 系统默认设备。也可以写名称片段，例如 "bluez"、"USB"。
-# input_device = "bluez"
-# output_device = "bluez"
+#
+# 启用 PipeWire（Ubuntu 22.04 + AEC，见 README 6.5）时写 "pipewire"：
+# 这样音频会经过 PipeWire 的默认 source/sink，也就是 echo-cancel 虚拟设备。
+# 注意：播放必须走 echo-cancel sink，否则 AEC 没有参考信号。
+# input_device = "pipewire"
+# output_device = "pipewire"
 playback_volume = 1.0
 
+# 启用了 AEC 之后，环境噪声和自身回声都被压低，min_rms 可以适当调小；
+# 没启用 AEC 时保持默认，避免把 TTS 的声音当成用户说话。
 [audio.vad]
 frame_ms = 20
 # 连续 3 帧（60ms）检测到能量才认为开口，避免咔哒声。

@@ -9,6 +9,8 @@ User=__USER__
 Group=audio
 WorkingDirectory=__APP_DIR__
 EnvironmentFile=__CONF_DIR__/xiaomeng.env
+# PipeWire 是用户会话服务，系统服务必须能找到它的 socket。
+Environment=XDG_RUNTIME_DIR=/run/user/__UID__
 ExecStart=__APP_DIR__/xiaomeng --config __CONF_DIR__/config.toml
 Restart=always
 RestartSec=3

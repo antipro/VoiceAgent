@@ -65,15 +65,17 @@ src/
   asr/             whisper.cpp 子进程封装
   tts/             Piper 子进程封装
 deploy/
-  install.sh       树莓派一键安装（依赖、引擎、模型、systemd）
+  install.sh       树莓派一键安装（依赖、引擎、模型、systemd、可选 AEC）
   xiaomeng.service
   asound.conf      ALSA / 蓝牙路由示例
+  pipewire/        PipeWire WebRTC AEC 配置（0.3.48 语法）
 examples/
   asr_probe.rs     单条 WAV 直连 whisper，排查识别问题
   tts_probe.rs     单句文本直连 piper，排查合成问题
 scripts/
   fetch-models.sh  下载模型（Mac / Pi 通用）
   build-pi.sh      交叉编译 + scp + 远程重启
+  setup-aec.sh     启用/检查 PipeWire 回声消除（安装后为 xiaomeng-aec）
 tests/
   agent_flow.rs    用假服务器验证 tool calling 闭环
 ```
@@ -165,22 +167,29 @@ WHISPER_MODEL=ggml-tiny.bin ./scripts/fetch-models.sh
 
 ### 6.1 系统要求（重要）
 
-- **推荐**：64 位 Raspberry Pi OS Bookworm，或 Ubuntu 22.04 / 24.04。
-- 原始规格里的 **Ubuntu 18.04（glibc 2.27）已 EOL**，且无法运行 `cross` 新镜像产出的二进制
-  （需要 glibc ≥ 2.36）。如果必须留在 18.04：
-  - 在树莓派上直接 `cargo build --release`（最稳），或
-  - 用 `aarch64-unknown-linux-musl` 静态链接（cpal/ALSA 需要额外配置，未验证）。
+- **目标系统：Ubuntu 22.04 LTS（glibc 2.35）**，或 64 位 Raspberry Pi OS Bookworm。
+- 22.04 上 **默认音频仍是 PulseAudio**，PipeWire 需要手动接管（见 6.5）。这不影响先跑起来，
+  但会影响 AEC。
+- 交叉编译注意：不同 `cross` 版本的镜像基于不同 Debian，glibc 可能比 2.35 新
+  （打开就报 `GLIBC_2.36 not found`）。**最稳的是在 Pi 上原生编译**：
+  `cargo install --path . --release`，或 `./deploy/install.sh --build`。
+  若一定要交叉编译，请选与 2.35 匹配的镜像，并在 Pi 上 `ldd --version` 核对。
 - 需要 `hci0` 正常、`libasound2-dev`、CMake、C++ 编译器。
 
 ### 6.2 一键安装
 
 ```bash
 git clone <repo> xiaomeng && cd xiaomeng
-sudo SERVICE_USER=pi ./deploy/install.sh --build
+sudo SERVICE_USER=pi ./deploy/install.sh --build          # 不含 AEC
+sudo SERVICE_USER=pi ./deploy/install.sh --build --aec    # 含 PipeWire + WebRTC AEC
 ```
 
 脚本会：装系统依赖 → 编译 whisper.cpp → 安装 Piper 与中文语音 → 下载模型 →
 写 `/etc/xiaomeng/config.toml` 与 `/etc/xiaomeng/xiaomeng.env` → 安装并启用 systemd 服务。
+加 `--aec` 时还会安装 PipeWire 音频栈、打开 linger、写入 AEC 配置。
+
+> systemd 单元里已经设置 `XDG_RUNTIME_DIR=/run/user/<uid>` —— 系统服务要访问用户会话的
+> PipeWire，少了这一行会退回到没有音频设备。
 
 然后在 `/etc/xiaomeng/xiaomeng.env` 填入密钥并重启：
 
@@ -198,7 +207,8 @@ cargo install cross          # 需要 Docker
 ```
 
 > `Cross.toml` 已经为 cpal 装好了目标架构的 `libasound2-dev`。
-> 再次强调 glibc 版本限制；跨不过去就直接在 Pi 上编译。
+> 但 cross 镜像的 glibc 版本必须 **小于等于** 目标系统的 2.35，否则 Pi 上会报
+> `GLIBC_2.xx not found`。遇到就改用 Pi 原生编译（`--build`），别在这上面耗时间。
 
 ### 6.4 蓝牙与 ALSA
 
@@ -238,6 +248,53 @@ Raspberry Pi OS 已内置固件，通常无需手动拷贝；若 `hci0` 不存�
 `/boot/firmware/config.txt` 里没有禁用蓝牙，再 `sudo systemctl restart hciuart`。
 Ubuntu 需要额外安装 `linux-firmware` 与 `bluez`。
 
+### 6.5 回声消除（PipeWire + WebRTC AEC）
+
+目标是在系统层把「音箱正在放的声音」从麦克风里扣掉，应用层（本项目）读到的就是干净音频，
+不需要在 Rust 里写 DSP。**方案可行，但 Ubuntu 22.04 上有四个硬性前提**：
+
+1. **22.04 默认不是 PipeWire 音频**。`pipewire-audio` 这个元包在 jammy 里不存在（24.04 才有），
+   要手动装 `pipewire pipewire-pulse pipewire-alsa wireplumber libpipewire-0.3-modules libspa-0.2-modules`，
+   并让 PipeWire 取代 PulseAudio。`--aec` 会做这些。
+2. **AEC 引擎必须落到 webrtc**。jammy 的 PipeWire 0.3.48 代码里默认值已经是
+   `aec/libspa-aec-webrtc`（文档注释还写着 exaudio，是过时的），但显式写出 `library.name`
+   最稳——旧版本或别人改过的配置里默认值不一定是它。
+3. **0.3.48 不能按设备名绑定**。`capture.props`/`playback.props` + `node.target` 是新版本才有的；
+   0.3.48 只会连到「当前默认」的 source/sink。所以**先连蓝牙耳机并让它成为默认设备，再加载模块**。
+   耳机没连就开机，模块会绑到空设备或 HDMI——这时重跑一次 `xiaomeng-aec` 即可。
+4. **应用侧要跟着改**。cpal 走 ALSA，看到的不是 PipeWire 节点名，而是 `pipewire` 这个 PCM，
+   所以配置写 `input_device = "pipewire"` / `output_device = "pipewire"`，
+   再由 PipeWire 的默认 source/sink 指向 echo-cancel。
+   **播放必须走 echo-cancel sink**，否则 AEC 拿不到参考信号，等于没开——这是最常见的「配了没用」。
+
+```bash
+# 耳机连好之后（会写入配置、重启 PipeWire、设默认、自检）
+xiaomeng-aec          # = scripts/setup-aec.sh
+xiaomeng-aec --check  # 随时检查 AEC 是否真的在链路里
+```
+
+检查通过时 `pactl info` 的默认输入输出都带 `echo-cancel`。模块没加载时看：
+
+```bash
+journalctl --user -u pipewire -n 50 --no-pager
+pw-cli ls Node | grep echo-cancel
+```
+
+配置示例见 `deploy/pipewire/51-xiaomeng-aec.conf`（按 0.3.48 语法写的：
+`aec.args` 是**空格分隔的字符串**，写成 JSON 对象会被静默忽略）。
+
+**蓝牙 profile 的取舍**：A2DP 只有输出，一旦开麦会切到 HFP（mSBC，16 kHz，音质下降）。
+一体式耳机走 HFP 时收发是同一个设备时钟，AEC 效果最好；如果输入输出分别走不同设备，
+0.3.48 又关闭了 drift compensation，残留回声会更明显。
+
+**不想折腾 PipeWire 的替代方案**：22.04 默认的 PulseAudio 也有同一个 WebRTC AEC，
+在 `/etc/pulse/default.pa` 加一行即可，稳定但功能少：
+
+```bash
+pactl load-module module-echo-cancel use_master_format=1 aec_method=webrtc \
+    source_name=echoCancelSource sink_name=echoCancelSink
+```
+
 ---
 
 ## 7. 交互细节与已知限制
@@ -258,13 +315,14 @@ Ubuntu 需要额外安装 `linux-firmware` 与 `bluez`。
 
 **已知限制**
 
-1. **没有回声消除（AEC）**。TTS 播放时麦克风仍开着（否则无法打断），
-   音箱声音可能被自己听到。实践中因为需要精确命中唤醒词，误触发概率低；
-   如果出现自唤醒，把音箱音量调低，或改用带 AEC 的会议麦克风。
+1. **默认没有回声消除**。TTS 播放时麦克风仍开着（否则无法打断），音箱声音可能被自己听到。
+   启用 6.5 的 PipeWire AEC 后，读到的是消过回声的音频；不启用时靠「必须精确命中唤醒词」
+   来降低误触发，实在不行就调低音量或用带 AEC 的会议麦克风。
 2. **唤醒延迟 1~2 秒**，取决于模型大小和「说完到静音判定」的 600ms。
 3. **串行识别**：ASR 一次只处理一句。播放期间产生的环境音会排队，
    极端情况下会延迟一次唤醒响应。
-4. **Ubuntu 18.04 不可用**（见 6.1）。
+4. **22.04 的 PipeWire 版本偏旧（0.3.48）**：AEC 不能按设备名绑定、模块只跟随默认设备，
+   开机顺序不对时要手动重跑 `xiaomeng-aec`（见 6.5）。
 5. **繁简转换是逐字表**（约 200 个高频字），不是完整 OpenCC。它只用于唤醒匹配，
    转写原文仍按 whisper 输出保存。遇到表外的字，可以在 `wake.words` 里补上对应写法。
 
@@ -301,6 +359,9 @@ CREATE INDEX IF NOT EXISTS idx_chat_history_session
 | 模型请求失败 401 | 检查 `DEEPSEEK_API_KEY` 是否被 systemd 读到（`EnvironmentFile`） |
 | 服务反复重启 | `journalctl -u xiaomeng -n 100 --no-pager` |
 | 蓝牙音质差/断连 | 用 5GHz WiFi，或改用 USB 蓝牙 dongle；2.4GHz 与 A2DP 容易互相干扰 |
+| `xiaomeng-aec --check` 报没有 echo-cancel 节点 | 耳机没连/没切到 HFP；或 `library.name` 没写；`journalctl --user -u pipewire -n 50` |
+| AEC 开了但还是自唤醒 | 播放没走 echo-cancel sink；`pactl get-default-sink` 必须是 `echo-cancel-sink` |
+| 系统服务里没有音频设备 | 单元缺少 `XDG_RUNTIME_DIR=/run/user/<uid>`，或没 `loginctl enable-linger pi` |
 
 ---
 
