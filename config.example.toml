@@ -1,0 +1,85 @@
+# 小蒙同学配置示例。复制为 config.toml 后按需修改。
+# 密钥不要写在这里，放到 .env 或 systemd 的 EnvironmentFile 中。
+
+[assistant]
+name = "小蒙同学"
+greeting = "我在"
+# 唤醒后等待用户说话的窗口（秒）。
+active_timeout_secs = 10
+system_prompt = """
+你是运行在树莓派上的离线语音助手，名叫“小蒙同学”。
+你通过语音与用户交流，所以回答必须口语化、简短（通常不超过 80 个字）。
+不要使用 Markdown、代码块、列表、表情符号或括号注释，因为回答会被直接朗读出来。
+需要实时资讯、天气、新闻、价格等你不确定的信息时，调用 web_search 工具再作答。
+如果搜索没有给出可靠结果，就如实说明，不要编造。
+"""
+
+[wake]
+enabled = true
+# 命中任意一个即可唤醒；模糊匹配会自动容忍同音错字。
+words = ["小蒙同学", "小蒙", "小萌同学", "小萌", "小明同学"]
+fuzzy_max_distance = 1
+fuzzy_max_len = 8
+
+[audio]
+# cpal：真实声卡；stdin：开发机手动输入。
+backend = "cpal"
+# 留空/注释掉 = 系统默认设备。也可以写名称片段，例如 "bluez"、"USB"。
+# input_device = "bluez"
+# output_device = "bluez"
+playback_volume = 1.0
+
+[audio.vad]
+frame_ms = 20
+# 连续 3 帧（60ms）检测到能量才认为开口，避免咔哒声。
+start_frames = 3
+# 尾部静音 600ms 认为一句话结束。
+end_silence_ms = 600
+pre_roll_ms = 300
+min_speech_ms = 350
+max_utterance_ms = 15000
+# 静音阈值（RMS）。环境吵就调大，例如 0.012。
+min_rms = 0.006
+noise_multiplier = 2.5
+
+[asr]
+engine = "whisper"
+# whisper.cpp 编译产物，通常在 whisper.cpp/build/bin/whisper-cli。
+command = "whisper-cli"
+# 中文建议 base 起步；树莓派 4 上 tiny 更快但准确率明显更低。
+model = "./models/ggml-base.bin"
+language = "zh"
+threads = 4
+extra_args = []
+
+[tts]
+engine = "piper"
+command = "piper"
+model = "./models/zh_CN-huayan-medium.onnx"
+# 留空则使用同名 .onnx.json。
+# config = "./models/zh_CN-huayan-medium.onnx.json"
+# speaker = 0
+# 小于 1 语速更快，大于 1 更慢。
+length_scale = 0.95
+extra_args = []
+
+[llm]
+base_url = "https://api.deepseek.com"
+model = "deepseek-chat"
+temperature = 0.7
+max_tokens = 512
+# 送入模型的最近消息条数（约等于轮数 × 2）。
+history_limit = 12
+# 工具调用最多几轮，防止模型反复搜索。
+max_tool_rounds = 3
+timeout_secs = 45
+
+[search]
+# tavily：需要 TAVILY_API_KEY；searxng：自建实例，无需密钥；none：关闭搜索工具。
+provider = "tavily"
+base_url = "http://127.0.0.1:8080"
+max_results = 4
+timeout_secs = 20
+
+[storage]
+path = "./data/assistant_sessions.db"

@@ -1,0 +1,25 @@
+[Unit]
+Description=Xiaomeng offline voice assistant
+After=network-online.target sound.target bluetooth.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=audio
+WorkingDirectory=__APP_DIR__
+EnvironmentFile=__CONF_DIR__/xiaomeng.env
+ExecStart=__APP_DIR__/xiaomeng --config __CONF_DIR__/config.toml
+Restart=always
+RestartSec=3
+# 音频实时优先级（可选，失败不影响启动）。
+Nice=-5
+LimitRTPRIO=20
+LimitMEMLOCK=infinity
+
+# 崩溃时保留最后一段日志
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

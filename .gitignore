@@ -1,0 +1,9 @@
+/target
+/data
+/models
+/.venv
+.env
+config.toml
+*.db
+*.db-wal
+*.db-shm

@@ -1,0 +1,17 @@
+# 交叉编译配置（可选路径）。
+#
+# 注意：cross 官方的 aarch64-unknown-linux-gnu 镜像基于 Debian bookworm（glibc 2.36），
+# 产物无法在 Ubuntu 18.04（glibc 2.27）上运行。
+# 如果目标系统仍是 18.04，请改为在树莓派上原生编译（见 deploy/install.sh）。
+#
+# 用法：cargo install cross && cross build --release --target aarch64-unknown-linux-gnu
+
+[target.aarch64-unknown-linux-gnu]
+# cpal 在 Linux 上依赖 ALSA，需要目标架构的 libasound 头文件与库。
+pre-build = [
+    "dpkg --add-architecture $CROSS_DEB_ARCH",
+    "apt-get update && apt-get install -y --no-install-recommends libasound2-dev:$CROSS_DEB_ARCH pkg-config",
+]
+
+[target.aarch64-unknown-linux-gnu.env]
+variables = { PKG_CONFIG_ALLOW_CROSS = "1" }
