@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 从 macOS 交叉编译并部署到树莓派。
 #
-#   ./scripts/build-pi.sh pi@raspberrypi.local
+#   ./scripts/build-pi.sh <用户名>@raspberrypi.local
 #
 # 前置：rustup target add aarch64-unknown-linux-gnu && cargo install cross
 #       （cross 需要 Docker 在运行）
