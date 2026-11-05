@@ -144,6 +144,12 @@ pub struct TtsConfig {
     pub model: PathBuf,
     /// piper 的 `.onnx.json`，留空则用同名文件。
     pub config: Option<PathBuf>,
+    /// edge 引擎的发音人。
+    pub voice: String,
+    /// edge-tts 可执行文件。
+    pub edge_command: String,
+    /// edge 语速，例如 "-5%"。
+    pub edge_rate: Option<String>,
     pub speaker: Option<i32>,
     /// 语速：小于 1 更快，大于 1 更慢。
     pub length_scale: f32,
@@ -276,6 +282,9 @@ impl Default for TtsConfig {
             command: "piper".into(),
             model: PathBuf::from("./models/zh_CN-huayan-medium.onnx"),
             config: None,
+            voice: "zh-CN-XiaoxiaoNeural".into(),
+            edge_command: "edge-tts".into(),
+            edge_rate: None,
             speaker: None,
             length_scale: 0.95,
             comma_pause_ms: 120,

@@ -205,6 +205,30 @@ WHISPER_MODEL=ggml-tiny.bin ./scripts/fetch-models.sh
 
 `zh_CN-huayan-medium.onnx` + 同名 `.onnx.json`，`scripts/fetch-models.sh` 会一起下载。
 
+### 5.1 语音引擎：Piper / Edge
+
+| 引擎 | 音质 | 首句延迟 | 需要联网 |
+| --- | --- | --- | --- |
+| `piper` | 中文带口音（官方只有 huayan 一个可用音色） | ~0.4s | 否 |
+| `edge` | 接近真人（微软 Edge 语音，如 Xiaoxiao） | 3s 左右，网络差会超时 | 是 |
+
+```toml
+[tts]
+engine = "edge"                      # 或 piper
+voice = "zh-CN-XiaoxiaoNeural"
+edge_command = "edge-tts"            # pip install --user edge-tts
+```
+
+部署后在设备上随时切换（改配置并重启服务）：
+
+```bash
+./switch-tts.sh edge    # 音质优先
+./switch-tts.sh piper   # 网络不好时切回离线
+```
+
+`edge` 失败会自动回退到 `piper`（前提是 `tts.model` 存在）：
+连续 2 次失败后进入 10 分钟冷却，期间直接用离线语音，冷却结束再试在线。
+
 Piper 自带的中文停顿很短（实测逗号只有 60~80ms），所以本项目会把回复按标点拆成小段，
 再按逗号/句号插入 120/350ms 静音。段数上限 12，过短的片段（「嗯，」）会自动并入下一段。
 

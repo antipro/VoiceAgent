@@ -76,6 +76,8 @@ beam_size = 1
 extra_args = []
 
 [tts]
+# piper：离线、首句 0.4s，但中文带口音
+# edge：在线，音质接近真人；网络失败会自动回退 piper，连续失败 5 分钟内不再尝试
 engine = "piper"
 command = "piper"
 model = "./models/zh_CN-huayan-medium.onnx"

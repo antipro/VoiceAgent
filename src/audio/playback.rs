@@ -52,7 +52,7 @@ pub async fn play_wav(
 
 fn play_blocking(path: &Path, audio_cfg: &AudioConfig, stop: Arc<AtomicBool>) -> Result<()> {
     let volume = audio_cfg.playback_volume;
-    let (samples, rate) = decode_wav(path)?;
+    let (samples, rate) = decode_audio(path)?;
     if samples.is_empty() {
         return Ok(());
     }
@@ -257,6 +257,90 @@ fn pick_output(host: &cpal::Host, name: Option<&str>) -> Result<cpal::Device> {
     }
     host.default_output_device()
         .ok_or_else(|| anyhow!("没有默认输出设备"))
+}
+
+/// 按扩展名解码：WAV 用 hound，MP3 用 symphonia。输出统一为单声道 f32。
+fn decode_audio(path: &Path) -> Result<(Vec<f32>, u32)> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ext == "mp3" {
+        decode_mp3(path)
+    } else {
+        decode_wav(path)
+    }
+}
+
+fn decode_mp3(path: &Path) -> Result<(Vec<f32>, u32)> {
+    use symphonia::core::codecs::audio::AudioDecoderOptions;
+    use symphonia::core::errors::Error as SymError;
+    use symphonia::core::formats::probe::Hint;
+    use symphonia::core::formats::{FormatOptions, TrackType};
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+
+    let file =
+        std::fs::File::open(path).with_context(|| format!("打开 MP3 失败: {}", path.display()))?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    hint.with_extension("mp3");
+
+    let mut format = symphonia::default::get_probe()
+        .probe(
+            &hint,
+            mss,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
+        .context("解析 MP3 失败")?;
+    let track = format
+        .default_track(TrackType::Audio)
+        .context("MP3 里没有音频轨")?;
+    let track_id = track.id;
+    let params = track
+        .codec_params
+        .as_ref()
+        .and_then(|p| p.audio())
+        .context("MP3 缺少音频参数")?;
+    let mut decoder = symphonia::default::get_codecs()
+        .make_audio_decoder(params, &AudioDecoderOptions::default())
+        .context("创建 MP3 解码器失败")?;
+
+    let mut mono = Vec::new();
+    let mut rate = 24_000u32;
+    let mut channels = 1usize;
+
+    while let Some(packet) = format.next_packet().context("读取 MP3 数据失败")? {
+        if packet.track_id != track_id {
+            continue;
+        }
+        match decoder.decode(&packet) {
+            Ok(buf) => {
+                let spec = buf.spec();
+                rate = spec.rate();
+                channels = spec.channels().count().max(1);
+                let n = buf.samples_interleaved();
+                let mut interleaved = vec![0f32; n];
+                buf.copy_to_slice_interleaved(&mut interleaved);
+                if channels > 1 {
+                    for frame in interleaved.chunks(channels) {
+                        mono.push(frame.iter().sum::<f32>() / channels as f32);
+                    }
+                } else {
+                    mono.extend_from_slice(&interleaved);
+                }
+            }
+            Err(SymError::DecodeError(_)) => continue,
+            Err(e) => return Err(e).context("解码 MP3 失败"),
+        }
+    }
+
+    if mono.is_empty() {
+        bail!("MP3 解码结果为空");
+    }
+    Ok((mono, rate))
 }
 
 /// 读取 WAV，下混为单声道 f32。
