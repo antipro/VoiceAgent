@@ -9,7 +9,7 @@ use crate::config::TtsConfig;
 use piper::Piper;
 
 pub enum Tts {
-    Piper(Piper),
+    Piper(Box<Piper>),
     /// 只打印文本，便于在开发机上跑通链路。
     Mock,
 }
@@ -17,7 +17,7 @@ pub enum Tts {
 impl Tts {
     pub fn from_config(cfg: &TtsConfig) -> Result<Self> {
         match cfg.engine.as_str() {
-            "piper" => Ok(Self::Piper(Piper::new(cfg)?)),
+            "piper" => Ok(Self::Piper(Box::new(Piper::new(cfg)?))),
             "mock" => Ok(Self::Mock),
             other => anyhow::bail!("未知的 tts.engine: {other}（可选 piper / mock）"),
         }
