@@ -408,12 +408,8 @@ mod tests {
     #[test]
     fn pinyin_matching_does_not_fire_on_similar_sentences() {
         // 发音不同，不能误唤醒。
-        for sentence in [
-            "小明的同学来了",
-            "明天同学聚会",
-            "笑蒙了",
-            "今天天气怎么样",
-        ] {
+        for sentence in ["小明的同学来了", "明天同学聚会", "笑蒙了", "今天天气怎么样"]
+        {
             let expected = is_wake(&cfg(), sentence);
             // 只有包含完整唤醒词发音的句子才允许为真；这里全部应为否。
             assert!(!expected, "should not wake on {sentence}");
