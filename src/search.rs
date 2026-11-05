@@ -1,14 +1,26 @@
-//! Web Search：Tavily 或自建 SearXNG。
+//! Web Search：默认用 DeepSeek 自带的 Search API（同一个 key），
+//! 也可以换成 Tavily 或自建 SearXNG。
 //!
 //! 大模型只看到一个 `web_search` 工具，具体供应商由配置决定。
+//!
+//! 注意：DeepSeek 的 Chat Completions 接口**没有**内置 `web_search` 工具
+//! （只有 Responses / Anthropic 格式支持服务端搜索），所以这里走官方的
+//! 独立 Search API：`POST /v1/tools/search`，按请求计费。
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::time::Duration;
 
-use crate::config::SearchConfig;
+use crate::config::{LlmConfig, SearchConfig};
 
 pub enum Searcher {
+    /// DeepSeek 官方搜索，复用 DEEPSEEK_API_KEY。
+    Deepseek {
+        http: reqwest::Client,
+        base_url: String,
+        api_key: String,
+        max_results: u32,
+    },
     Tavily {
         http: reqwest::Client,
         api_key: String,
@@ -23,18 +35,38 @@ pub enum Searcher {
 }
 
 impl Searcher {
-    pub fn from_config(cfg: &SearchConfig) -> Result<Self> {
+    pub fn from_config(cfg: &SearchConfig, llm: &LlmConfig) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(cfg.timeout_secs.max(5)))
             .build()
             .context("创建搜索 HTTP 客户端失败")?;
 
         match cfg.provider.as_str() {
-            "tavily" => Ok(Self::Tavily {
-                http,
-                api_key: cfg.api_key.expose().to_string(),
-                max_results: cfg.max_results.clamp(1, 10),
-            }),
+            "deepseek" => {
+                if llm.api_key.is_empty() {
+                    tracing::warn!(
+                        "search.provider=deepseek 但没有 DEEPSEEK_API_KEY，已关闭搜索工具"
+                    );
+                    return Ok(Self::Disabled);
+                }
+                Ok(Self::Deepseek {
+                    http,
+                    base_url: llm.base_url.trim_end_matches('/').to_string(),
+                    api_key: llm.api_key.expose().to_string(),
+                    max_results: cfg.max_results.clamp(1, 10),
+                })
+            }
+            "tavily" => {
+                if cfg.api_key.is_empty() {
+                    tracing::warn!("search.provider=tavily 但没有 TAVILY_API_KEY，已关闭搜索工具");
+                    return Ok(Self::Disabled);
+                }
+                Ok(Self::Tavily {
+                    http,
+                    api_key: cfg.api_key.expose().to_string(),
+                    max_results: cfg.max_results.clamp(1, 10),
+                })
+            }
             "searxng" => Ok(Self::Searxng {
                 http,
                 base_url: cfg.base_url.trim_end_matches('/').to_string(),
@@ -54,7 +86,8 @@ impl Searcher {
         if !self.enabled() {
             return None;
         }
-        Some(serde_json::json!({
+        // 注意：OpenAI 兼容接口要求 tools 是数组，这里直接返回数组。
+        Some(serde_json::json!([{
             "type": "function",
             "function": {
                 "name": "web_search",
@@ -70,11 +103,17 @@ impl Searcher {
                     "required": ["query"]
                 }
             }
-        }))
+        }]))
     }
 
     pub async fn search(&self, query: &str) -> Result<String> {
         match self {
+            Self::Deepseek {
+                http,
+                base_url,
+                api_key,
+                max_results,
+            } => deepseek(http, base_url, api_key, *max_results, query).await,
             Self::Tavily {
                 http,
                 api_key,
@@ -88,6 +127,99 @@ impl Searcher {
             Self::Disabled => Ok("搜索未启用。".into()),
         }
     }
+}
+
+async fn deepseek(
+    http: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+    max_results: u32,
+    query: &str,
+) -> Result<String> {
+    if query.trim().is_empty() {
+        bail!("搜索词为空");
+    }
+    // base_url 可能写成 https://api.deepseek.com 或 .../v1，统一成 .../v1/tools/search。
+    let base = base_url.trim_end_matches('/');
+    let base = base.strip_suffix("/v1").unwrap_or(base);
+    let url = format!("{base}/v1/tools/search");
+
+    let body = serde_json::json!({
+        "query": query,
+        "count": max_results,
+        "need_content": false,
+    });
+    let resp = http
+        .post(&url)
+        .bearer_auth(api_key)
+        .json(&body)
+        .send()
+        .await
+        .context("请求 DeepSeek Search API 失败")?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        bail!(
+            "DeepSeek Search 返回 {status}: {}",
+            text.chars().take(200).collect::<String>()
+        );
+    }
+    let parsed: DeepseekResponse =
+        serde_json::from_str(&text).context("解析 DeepSeek Search 响应失败")?;
+    Ok(format_deepseek(query, parsed))
+}
+
+#[derive(Deserialize)]
+struct DeepseekResponse {
+    #[serde(default)]
+    results: Vec<DeepseekResult>,
+}
+
+#[derive(Deserialize)]
+struct DeepseekResult {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    snippet: String,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    date: Option<String>,
+}
+
+fn format_deepseek(query: &str, resp: DeepseekResponse) -> String {
+    let mut out = format!("搜索：{query}\n");
+    for (i, r) in resp.results.iter().enumerate() {
+        // summary 约 600~800 字，最适合给模型看；没有再退回 snippet / content。
+        let body = if !r.summary.trim().is_empty() {
+            r.summary.as_str()
+        } else if !r.content.trim().is_empty() {
+            r.content.as_str()
+        } else {
+            r.snippet.as_str()
+        };
+        let date = r
+            .date
+            .as_deref()
+            .map(|d| format!(" · {d}"))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "{}. {}（{}）{}\n{}\n",
+            i + 1,
+            r.title.trim(),
+            r.url.trim(),
+            date,
+            trim_chars(body.trim(), 400)
+        ));
+    }
+    if resp.results.is_empty() {
+        out.push_str("没有找到结果。");
+    }
+    trim_chars(&out, 2400)
 }
 
 async fn tavily(

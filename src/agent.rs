@@ -21,7 +21,7 @@ pub struct Agent {
 
 impl Agent {
     pub fn new(cfg: &Config, store: Arc<Store>) -> Result<Self> {
-        let search = Searcher::from_config(&cfg.search)?;
+        let search = Searcher::from_config(&cfg.search, &cfg.llm)?;
         Ok(Self {
             llm: LlmClient::new(&cfg.llm)?,
             tool_definition: search.tool_definition(),

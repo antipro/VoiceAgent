@@ -11,7 +11,7 @@ Rust + Tokio 实现，蓝牙麦克风/音箱走 ALSA / cpal，对话记录落 SQ
                  FSM（Idle / Active / Busy）◀── 唤醒词随时打断
                         │
                         ▼
-                  DeepSeek（tool_calls）──▶ web_search（Tavily / SearXNG）
+                  DeepSeek（tool_calls）──▶ web_search（DeepSeek Search / Tavily / SearXNG）
                         │
                         ▼
                  Piper TTS ──WAV──▶ cpal ──▶ 蓝牙音箱
@@ -24,7 +24,7 @@ Rust + Tokio 实现，蓝牙麦克风/音箱走 ALSA / cpal，对话记录落 SQ
 | 设计规格 | 实现方式 |
 | --- | --- |
 | 唤醒词「小蒙同学」 | VAD 切句 + whisper 转写 + 归一化匹配（繁体转简体、同音容错：小萌 / 小明 / 小梦） |
-| Active 10 秒窗口 | `tokio::time` 截止时间；问候语播放耗时不计入窗口 |
+| Active 10 秒窗口 | `tokio::time` 截止时间；问候语播放耗时不计入窗口；一旦检测到用户开口就重新计时 |
 | 随时打断 | 唤醒代际（`watch<u64>`）广播，LLM 请求、TTS 合成、音频播放都会被立即取消 |
 | Tool Calling 闭环 | 原生 OpenAI 兼容实现，最多 3 轮，搜索失败会回传给模型而不是崩溃 |
 | SQLite 会话记录 | 表结构见第 8 节，使用 WAL 模式，阻塞调用走 `spawn_blocking` |
@@ -53,7 +53,7 @@ src/
   fsm.rs           状态机与打断逻辑
   agent.rs         多轮对话 + 工具调用闭环
   llm.rs           OpenAI 兼容客户端（DeepSeek）
-  search.rs        Tavily / SearXNG
+  search.rs        DeepSeek Search / Tavily / SearXNG
   memory.rs        SQLite 持久化
   util.rs          文本清洗、唤醒词匹配、Markdown 去除
   audio/
@@ -90,7 +90,7 @@ cp .env.example .env          # 填入 DEEPSEEK_API_KEY
 cargo run -- --dev
 ```
 
-`--dev` 会切换为「标准输入 + mock ASR/TTS」：
+`--dev` 会切换为「标准输入 + mock ASR/TTS」，并把 10 秒等待窗口放宽到 60 秒（打字比说话慢）：
 
 ```text
 [dev] 输入一行文本并回车，模拟"听到"一句话；Ctrl-D 或 /quit 退出。
@@ -119,11 +119,36 @@ cp config.example.toml config.toml
 
 | 变量 | 说明 |
 | --- | --- |
-| `DEEPSEEK_API_KEY` | 必填 |
-| `TAVILY_API_KEY` | `search.provider = "tavily"` 时必填 |
-| `SEARXNG_URL` | `search.provider = "searxng"` 时使用 |
+| `DEEPSEEK_API_KEY` | **必填**，对话和联网搜索都用它 |
+| `TAVILY_API_KEY` | 可选，只有 `search.provider = "tavily"` 时需要 |
+| `SEARXNG_URL` | 可选，`search.provider = "searxng"` 时使用 |
 | `WHISPER_MODEL` / `PIPER_MODEL` | 覆盖模型路径 |
 | `RUST_LOG` | 例如 `info`、`debug` |
+
+### 4.1 联网搜索用哪个
+
+默认 `search.provider = "deepseek"`，**复用 `DEEPSEEK_API_KEY`，不需要第二个 key**。
+
+容易混淆的一点：DeepSeek 的 **Chat Completions** 接口没有内置 `web_search` 工具
+（Responses / Anthropic 格式才有服务端搜索，Chat Completions 会静默忽略），
+但它提供了独立的 **Search API**：
+
+```http
+POST https://api.deepseek.com/v1/tools/search
+Authorization: Bearer <DEEPSEEK_API_KEY>
+
+{"query": "...", "count": 5, "need_content": false}
+```
+
+按成功请求计费（$0.75 / 1000 次），返回 `title / url / summary / date` 等结构，
+本项目的 `web_search` 工具就是调它。三种实现按需切换：
+
+| provider | 需要额外的 key | 说明 |
+| --- | --- | --- |
+| `deepseek`（默认） | 否 | 官方搜索，按次计费 |
+| `tavily` | `TAVILY_API_KEY` | 第三方，有免费额度 |
+| `searxng` | 否 | 自建实例，完全免费，但结果质量看实例 |
+| `none` | 否 | 关掉工具，模型只凭训练知识回答 |
 
 检查配置与模型文件：
 
@@ -351,7 +376,7 @@ pactl load-module module-echo-cancel use_master_format=1 aec_method=webrtc \
 | 状态 | 行为 | 退出条件 |
 | --- | --- | --- |
 | `Idle` | 持续采集、切句、转写，只匹配唤醒词 | 命中唤醒词 |
-| `Active` | 播报「我在」，开 10 秒窗口 | 用户说话 → `Busy`；超时 → `Idle`；再次唤醒 → 重开 |
+| `Active` | 播报「我在」，开 10 秒窗口；检测到用户开口就重新计时 | 用户说话 → `Busy`；超时 → `Idle`；再次唤醒 → 重开 |
 | `Busy` | 请求模型、调工具、播报回答 | 播报结束 → `Active`；唤醒词 → 立即中断并重开 |
 
 **一句话连唤醒带提问**：说「小蒙同学，今天天气怎么样」时，唤醒词之后的内容会直接作为本轮提问，
@@ -404,6 +429,8 @@ CREATE INDEX IF NOT EXISTS idx_chat_history_session
 | 一直不唤醒 | 看日志里是否有「识别」行；有文本但不匹配 → 把实际文本加进 `wake.words` |
 | 想单独验证 ASR | `cargo run --release --example asr_probe -- /tmp/录音.wav config.toml`，会打印原文、清洗结果和是否命中唤醒词 |
 | 模型请求失败 401 | 检查 `DEEPSEEK_API_KEY` 是否被 systemd 读到（`EnvironmentFile`） |
+| 模型请求失败 422 `tools: invalid type` | 旧版本 bug，已修复；`cargo build` 重新编译即可 |
+| 搜索报 402 / 429 | DeepSeek 余额不足，或触发 Search API 的 QPS 限制（100 QPS） |
 | 服务反复重启 | `journalctl -u xiaomeng -n 100 --no-pager` |
 | 蓝牙音质差/断连 | 用 5GHz WiFi，或改用 USB 蓝牙 dongle；2.4GHz 与 A2DP 容易互相干扰 |
 | `xiaomeng-aec --check` 报没有 echo-cancel 节点 | 耳机没连/没切到 HFP；或 `library.name` 没写；`journalctl --user -u pipewire -n 50` |

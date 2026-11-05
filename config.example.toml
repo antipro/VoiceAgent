@@ -81,8 +81,11 @@ max_tool_rounds = 3
 timeout_secs = 45
 
 [search]
-# tavily：需要 TAVILY_API_KEY；searxng：自建实例，无需密钥；none：关闭搜索工具。
-provider = "tavily"
+# deepseek：默认，复用 DEEPSEEK_API_KEY（POST /v1/tools/search，按次计费）
+# tavily：需要 TAVILY_API_KEY
+# searxng：自建实例，无需密钥（base_url 见下）
+# none：关闭搜索工具，助手只凭模型知识回答
+provider = "deepseek"
 base_url = "http://127.0.0.1:8080"
 max_results = 4
 timeout_secs = 20

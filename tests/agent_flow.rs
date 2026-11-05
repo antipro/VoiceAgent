@@ -9,6 +9,7 @@ use tokio::net::{TcpListener, TcpStream};
 use xiaomeng::agent::Agent;
 use xiaomeng::config::{Config, Secret};
 use xiaomeng::memory::{Role, Store};
+use xiaomeng::search::Searcher;
 
 #[tokio::test]
 async fn tool_call_round_trip() {
@@ -77,6 +78,11 @@ async fn tool_call_round_trip() {
     let bodies = server.await.unwrap();
     assert_eq!(bodies.len(), 2, "should call the model twice");
     assert!(
+        bodies[0].contains("\"tools\":["),
+        "tools must be a JSON array: {}",
+        bodies[0]
+    );
+    assert!(
         bodies[1].contains("tool_call_id"),
         "second request must carry tool result: {}",
         bodies[1]
@@ -107,6 +113,56 @@ async fn persists_user_message_even_without_api_key() {
     assert_eq!(history[0].role, Role::User.as_str());
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn deepseek_search_uses_llm_key_and_v1_endpoint() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let (head, body) = read_request(&mut socket).await;
+        respond(
+            &mut socket,
+            r#"{"results":[{"title":"北京天气","url":"https://example.com/w","summary":"北京今天晴，25 摄氏度","snippet":"晴","date":"2026-11-05T00:00:00+00:00"}]}"#,
+        )
+        .await;
+        (head, body)
+    });
+
+    let mut cfg = Config::default();
+    cfg.llm.base_url = format!("http://{addr}");
+    cfg.llm.api_key = Secret("sk-test".into());
+    cfg.search.provider = "deepseek".into();
+    cfg.search.max_results = 3;
+
+    let searcher = Searcher::from_config(&cfg.search, &cfg.llm).unwrap();
+    let text = searcher.search("北京天气").await.unwrap();
+    assert!(text.contains("北京今天晴"), "unexpected result: {text}");
+
+    let (head, body) = server.await.unwrap();
+    assert!(
+        head.starts_with("POST /v1/tools/search"),
+        "wrong endpoint: {head}"
+    );
+    assert!(
+        head.to_lowercase()
+            .contains("authorization: bearer sk-test"),
+        "must reuse the DeepSeek key: {head}"
+    );
+    assert!(body.contains("\"count\":3"), "body: {body}");
+    assert!(body.contains("北京天气"), "body: {body}");
+}
+
+#[tokio::test]
+async fn missing_key_disables_search_tool() {
+    let mut cfg = Config::default();
+    cfg.search.provider = "deepseek".into();
+    cfg.llm.api_key = Secret(String::new());
+
+    let searcher = Searcher::from_config(&cfg.search, &cfg.llm).unwrap();
+    assert!(searcher.tool_definition().is_none());
 }
 
 async fn read_request(stream: &mut TcpStream) -> (String, String) {

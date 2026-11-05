@@ -17,8 +17,13 @@ use crate::memory::{Role, Store};
 use crate::tts::Tts;
 use crate::util;
 
+/// Active 到期后额外等待的时间，避免把「卡在截止点」的输入丢掉。
+const ACTIVE_GRACE: Duration = Duration::from_millis(600);
+
 #[derive(Debug)]
 pub enum Event {
+    /// VAD 检测到用户开口（还没出识别结果）。
+    SpeechStarted,
     /// 识别出一句话。
     Heard { text: String },
     /// 一轮问答（含播报）结束。
@@ -85,14 +90,32 @@ impl Controller {
             };
 
             let event = match deadline {
-                Some(until) => tokio::select! {
-                    ev = self.rx.recv() => ev,
-                    _ = tokio::time::sleep_until(until) => {
-                        tracing::info!("Active 超时，回到待命");
-                        self.state = State::Idle;
-                        continue;
+                Some(until) => {
+                    let mut timed_out = false;
+                    let ev = tokio::select! {
+                        ev = self.rx.recv() => ev,
+                        _ = tokio::time::sleep_until(until) => {
+                            timed_out = true;
+                            None
+                        }
+                    };
+                    if timed_out {
+                        // 边界保护：识别结果可能正在路上（VAD 收尾、ASR 推理、开发模式回车）。
+                        match tokio::time::timeout(ACTIVE_GRACE, self.rx.recv()).await {
+                            Ok(ev) => ev,
+                            Err(_) => {
+                                tracing::info!(
+                                    secs = self.cfg.assistant.active_timeout_secs,
+                                    "Active 超时（窗口内没有说话），回到待命"
+                                );
+                                self.state = State::Idle;
+                                continue;
+                            }
+                        }
+                    } else {
+                        ev
                     }
-                },
+                }
                 None => self.rx.recv().await,
             };
 
@@ -108,6 +131,14 @@ impl Controller {
 
     async fn handle(&mut self, event: Event) -> Result<()> {
         match event {
+            Event::SpeechStarted => {
+                // 用户已经开口，但一句话还没说完/没识别完：重新计时，别在句子中间超时。
+                if let State::Active { session, .. } = self.state.clone() {
+                    self.enter_active(session);
+                    tracing::debug!("检测到用户开口，等待窗口重新计时");
+                }
+                Ok(())
+            }
             Event::Heard { text } => self.on_heard(text).await,
             Event::PipelineDone { generation } => {
                 if generation == self.generation {

@@ -278,7 +278,7 @@ impl Default for LlmConfig {
 impl Default for SearchConfig {
     fn default() -> Self {
         Self {
-            provider: "tavily".into(),
+            provider: "deepseek".into(),
             api_key: Secret::default(),
             base_url: "http://127.0.0.1:8080".into(),
             max_results: 4,
@@ -387,6 +387,15 @@ impl Config {
             }
             if self.search.provider == "tavily" && self.search.api_key.is_empty() {
                 bail!("search.provider=tavily 但缺少 TAVILY_API_KEY");
+            }
+            if !matches!(
+                self.search.provider.as_str(),
+                "deepseek" | "tavily" | "searxng" | "none" | "disabled"
+            ) {
+                bail!(
+                    "未知的 search.provider: {}（可选 deepseek / tavily / searxng / none）",
+                    self.search.provider
+                );
             }
         }
         Ok(())

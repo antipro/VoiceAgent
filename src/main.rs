@@ -76,8 +76,9 @@ async fn main() -> Result<()> {
 
             let (seg_tx, seg_rx) = mpsc::channel(4);
             let vad_cfg = cfg.audio.vad.clone();
+            let vad_events = tx.clone();
             tokio::spawn(async move {
-                audio::vad::run(pcm_rx, seg_tx, vad_cfg).await;
+                audio::vad::run(pcm_rx, seg_tx, vad_events, vad_cfg).await;
             });
 
             let asr_engine = asr::Asr::from_config(&cfg.asr)?;
@@ -108,6 +109,11 @@ fn apply_dev(cfg: &mut Config) {
     cfg.audio.backend = "stdin".into();
     cfg.asr.engine = "mock".into();
     cfg.tts.engine = "mock".into();
+    // 手动打字比说话慢，开发模式把 Active 窗口放宽，避免刚唤醒就超时。
+    if cfg.assistant.active_timeout_secs < 60 {
+        cfg.assistant.active_timeout_secs = 60;
+        tracing::info!("开发模式：Active 窗口放宽到 60 秒");
+    }
 }
 
 fn init_tracing(dev: bool) {

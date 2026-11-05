@@ -9,6 +9,14 @@ use tokio::sync::mpsc;
 
 use crate::audio::{rms, TARGET_RATE};
 use crate::config::VadConfig;
+use crate::fsm::Event;
+
+/// 一次 `push` 的结果：是否刚开口，以及本次凑齐的完整语句。
+#[derive(Debug, Default)]
+pub struct VadOutput {
+    pub speech_started: bool,
+    pub utterances: Vec<Vec<f32>>,
+}
 
 pub struct Segmenter {
     frame_len: usize,
@@ -32,14 +40,22 @@ pub struct Segmenter {
 }
 
 /// 把采集到的 PCM 连续切片，产出完整语句。
+///
+/// 除了完整语句，还会把「刚开始说话」通知给状态机，
+/// 这样一句话说到一半时不会被 Active 超时打断。
 pub async fn run(
     mut pcm: mpsc::UnboundedReceiver<Vec<f32>>,
     out: mpsc::Sender<Vec<f32>>,
+    events: mpsc::Sender<Event>,
     cfg: VadConfig,
 ) {
     let mut segmenter = Segmenter::new(&cfg, TARGET_RATE);
     while let Some(chunk) = pcm.recv().await {
-        for utterance in segmenter.push(&chunk) {
+        let result = segmenter.push(&chunk);
+        if result.speech_started && events.send(Event::SpeechStarted).await.is_err() {
+            return;
+        }
+        for utterance in result.utterances {
             tracing::debug!(samples = utterance.len(), "检测到一句话");
             if out.send(utterance).await.is_err() {
                 return;
@@ -78,19 +94,19 @@ impl Segmenter {
     }
 
     /// 喂入任意长度的 16 kHz 单声道音频，返回本次凑齐的完整语句。
-    pub fn push(&mut self, samples: &[f32]) -> Vec<Vec<f32>> {
-        let mut done = Vec::new();
+    pub fn push(&mut self, samples: &[f32]) -> VadOutput {
+        let mut out = VadOutput::default();
         for &s in samples {
             self.frame.push(s);
             if self.frame.len() >= self.frame_len {
                 let frame = std::mem::replace(&mut self.frame, Vec::with_capacity(self.frame_len));
-                self.on_frame(frame, &mut done);
+                self.on_frame(frame, &mut out);
             }
         }
-        done
+        out
     }
 
-    fn on_frame(&mut self, frame: Vec<f32>, done: &mut Vec<Vec<f32>>) {
+    fn on_frame(&mut self, frame: Vec<f32>, out: &mut VadOutput) {
         let level = rms(&frame);
         let threshold = (self.noise * self.noise_multiplier).max(self.min_rms);
 
@@ -102,6 +118,7 @@ impl Segmenter {
                     self.ring.pop_front();
                 }
                 if self.voiced_run >= self.start_frames {
+                    out.speech_started = true;
                     self.active = true;
                     self.silence_run = 0;
                     self.voiced_samples = 0;
@@ -135,7 +152,7 @@ impl Segmenter {
         let length_done = self.speech.len() >= self.max_samples;
         let quiet_tail = level <= threshold;
         if (silence_done && quiet_tail) || length_done {
-            self.finish(done);
+            self.finish(&mut out.utterances);
         }
     }
 
@@ -173,12 +190,16 @@ mod tests {
         let mut seg = Segmenter::new(&cfg, 16_000);
         let mut out = Vec::new();
         // 1 秒语音 + 1 秒静音
+        let mut started = false;
         for _ in 0..100 {
-            out.extend(seg.push(&tone(160, 0.2)));
+            let r = seg.push(&tone(160, 0.2));
+            started |= r.speech_started;
+            out.extend(r.utterances);
         }
         for _ in 0..100 {
-            out.extend(seg.push(&[0.0f32; 160]));
+            out.extend(seg.push(&[0.0f32; 160]).utterances);
         }
+        assert!(started, "should report speech start");
         assert_eq!(out.len(), 1, "should produce exactly one utterance");
         assert!(out[0].len() > 10_000);
     }
@@ -188,9 +209,9 @@ mod tests {
         let cfg = VadConfig::default();
         let mut seg = Segmenter::new(&cfg, 16_000);
         let mut out = Vec::new();
-        out.extend(seg.push(&tone(1_600, 0.3))); // 100 ms
+        out.extend(seg.push(&tone(1_600, 0.3)).utterances); // 100 ms
         for _ in 0..100 {
-            out.extend(seg.push(&vec![0.0f32; 160]));
+            out.extend(seg.push(&vec![0.0f32; 160]).utterances);
         }
         assert!(out.is_empty());
     }

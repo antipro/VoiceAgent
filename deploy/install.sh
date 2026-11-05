@@ -213,7 +213,8 @@ base_url = "https://api.deepseek.com"
 model = "deepseek-chat"
 
 [search]
-provider = "tavily"
+# deepseek 复用 DEEPSEEK_API_KEY；也可改成 tavily / searxng / none
+provider = "deepseek"
 
 [storage]
 path = "$DATA_DIR/assistant_sessions.db"
@@ -226,7 +227,8 @@ if [[ ! -f "$CONF_DIR/xiaomeng.env" ]]; then
     log "写入 $CONF_DIR/xiaomeng.env（请填入密钥）"
     cat > "$CONF_DIR/xiaomeng.env" <<EOF
 DEEPSEEK_API_KEY=
-TAVILY_API_KEY=
+# 可选：只有 search.provider=tavily 时才需要
+# TAVILY_API_KEY=
 RUST_LOG=info
 EOF
     chmod 600 "$CONF_DIR/xiaomeng.env"
@@ -250,7 +252,7 @@ systemctl enable xiaomeng.service >/dev/null
 log "完成。"
 echo
 echo "下一步："
-echo "  1. sudo nano $CONF_DIR/xiaomeng.env   # 填入 DEEPSEEK_API_KEY / TAVILY_API_KEY"
+echo "  1. sudo nano $CONF_DIR/xiaomeng.env   # 填入 DEEPSEEK_API_KEY（搜索也用它）"
 if [[ $AEC -eq 1 ]]; then
     echo "  1b. 连好蓝牙耳机后启用 AEC：sudo -u $SERVICE_USER XDG_RUNTIME_DIR=/run/user/$SERVICE_UID xiaomeng-aec"
 fi
