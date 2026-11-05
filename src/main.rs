@@ -63,6 +63,7 @@ async fn main() -> Result<()> {
 
     match cfg.audio.backend.as_str() {
         "stdin" => {
+            eprintln!("[dev] 输入文本回车；Ctrl-C / Ctrl-D / /quit 退出");
             let tx = tx.clone();
             tokio::spawn(async move {
                 if let Err(e) = audio::stdin_source::run(tx).await {

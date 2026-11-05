@@ -90,7 +90,14 @@ cp .env.example .env          # 填入 DEEPSEEK_API_KEY
 cargo run -- --dev
 ```
 
-`--dev` 会切换为「标准输入 + mock ASR/TTS」，并把 10 秒等待窗口放宽到 60 秒（打字比说话慢）：
+`--dev` 会切换为「标准输入 + mock ASR/TTS」，并把 10 秒等待窗口放宽到 60 秒（打字比说话慢）。
+输入用 `rustyline` 做行编辑，中文退格按整字删除（直接读 stdin 时内核按字节处理，一个汉字要按三次退格）：
+
+```text
+你说> 小蒙同学
+```
+
+`Ctrl-C` / `Ctrl-D` / `/quit` 退出。
 
 ```text
 [dev] 输入一行文本并回车，模拟"听到"一句话；Ctrl-D 或 /quit 退出。
