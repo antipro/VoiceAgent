@@ -79,6 +79,13 @@ fn play_blocking(path: &Path, audio_cfg: &AudioConfig, stop: Arc<AtomicBool>) ->
     let pcm = Arc::new(pcm);
     let finished = Arc::new(AtomicBool::new(false));
 
+    tracing::info!(
+        device = %device,
+        rate = out_rate,
+        seconds = total_samples as f64 / out_rate.max(1) as f64,
+        "开始播放"
+    );
+
     let stream = match format {
         SampleFormat::I8 => build::<i8>(
             &device,
@@ -164,21 +171,31 @@ fn play_blocking(path: &Path, audio_cfg: &AudioConfig, stop: Arc<AtomicBool>) ->
     }?;
 
     stream.play().context("启动输出流失败")?;
+    let play_start = StdInstant::now();
 
-    // 预留一点硬件缓冲时间，避免最后一个字被截断。
-    let grace = Duration::from_millis(150);
-    // 兜底：设备没有回调时也要退出，避免任务永久卡住。
+    // 注意：PulseAudio 会在流启动时预填约 2 秒缓冲，回调很快就把 PCM 读完
+    // （finished 提前置位）。只等 finished 会立刻关闭流，服务端缓冲里剩下的
+    // 那段就被丢掉了——表现就是「说到一半中断」。
+    // 所以必须同时满足：缓冲区已写完 + 墙钟走完音频时长。
     let audio_secs = total_samples as f64 / out_rate.max(1) as f64;
-    let deadline = StdInstant::now() + Duration::from_secs_f64(audio_secs * 1.5 + 3.0);
-    while !finished.load(Ordering::SeqCst)
-        && !stop.load(Ordering::SeqCst)
-        && StdInstant::now() < deadline
-    {
+    let audio_dur = Duration::from_secs_f64(audio_secs);
+    let tail = Duration::from_millis(250);
+    let deadline = StdInstant::now() + audio_dur.mul_f64(1.5) + Duration::from_secs(5);
+
+    let reason = loop {
+        if stop.load(Ordering::SeqCst) {
+            break "cancelled";
+        }
+        let elapsed = play_start.elapsed();
+        if finished.load(Ordering::SeqCst) && elapsed + tail >= audio_dur {
+            break "finished";
+        }
+        if StdInstant::now() >= deadline {
+            break "deadline";
+        }
         std::thread::sleep(Duration::from_millis(20));
-    }
-    if finished.load(Ordering::SeqCst) && !stop.load(Ordering::SeqCst) {
-        std::thread::sleep(grace);
-    }
+    };
+    tracing::info!(reason, "播放结束");
     Ok(())
 }
 

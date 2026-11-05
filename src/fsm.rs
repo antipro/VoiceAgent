@@ -256,7 +256,10 @@ impl Controller {
         let mut audio_rx = self.audio_tx.subscribe();
 
         tokio::spawn(async move {
-            if let Err(e) = speak(&cfg, &tts, &greeting, &mut wake_rx, &mut audio_rx).await {
+            // 用户紧接着提问时，连合成都该停掉，别白白跑 8 秒 Piper。
+            if let Err(e) =
+                speak_cancellable(&cfg, &tts, &greeting, &mut wake_rx, &mut audio_rx).await
+            {
                 tracing::warn!("播报唤醒应答失败: {e:#}");
             }
             let _ = tx.send(Event::GreetingDone { generation }).await;
@@ -297,7 +300,8 @@ impl Controller {
                     tracing::info!(reply = %reply.text, end_session = reply.end_session, "回答");
                     end_session = reply.end_session;
                     if let Err(e) =
-                        speak(&cfg, &tts, &reply.text, &mut wake_rx, &mut audio_rx).await
+                        speak_cancellable(&cfg, &tts, &reply.text, &mut wake_rx, &mut audio_rx)
+                            .await
                     {
                         tracing::warn!("播报失败: {e:#}");
                     }
@@ -314,6 +318,29 @@ impl Controller {
         });
 
         Ok(())
+    }
+}
+
+/// 播报，但允许被「新唤醒 / 新请求」打断——包括打断 TTS 合成阶段。
+async fn speak_cancellable(
+    cfg: &Config,
+    tts: &Tts,
+    text: &str,
+    wake_rx: &mut watch::Receiver<u64>,
+    audio_rx: &mut watch::Receiver<u64>,
+) -> Result<()> {
+    let mut guard_wake = wake_rx.clone();
+    let mut guard_audio = audio_rx.clone();
+    tokio::select! {
+        r = speak(cfg, tts, text, wake_rx, audio_rx) => r,
+        _ = guard_wake.changed() => {
+            tracing::debug!("播报被新会话打断");
+            Ok(())
+        }
+        _ = guard_audio.changed() => {
+            tracing::debug!("播报被新请求打断");
+            Ok(())
+        }
     }
 }
 

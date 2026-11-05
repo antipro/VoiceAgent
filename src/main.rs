@@ -133,7 +133,14 @@ fn apply_dev(cfg: &mut Config) {
 fn init_tracing(dev: bool) {
     use tracing_subscriber::EnvFilter;
     let default = if dev { "debug" } else { "info" };
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(default))
+        // PulseAudio 客户端在流关闭时会打一条无害的 Reactor error，屏蔽掉。
+        .add_directive(
+            "pulseaudio::client::reactor=off"
+                .parse()
+                .expect("valid directive"),
+        );
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
