@@ -64,6 +64,10 @@ command = "whisper-cli"
 model = "./models/ggml-base.bin"
 language = "zh"
 threads = 4
+# 1 = 贪心解码（树莓派上快很多）；5 = beam search，更准但慢数倍
+beam_size = 1
+# 编码窗口（mel 帧，1500 = 30 秒）；注释掉 = 按音频长度自动
+# audio_ctx = 0
 extra_args = []
 
 [tts]

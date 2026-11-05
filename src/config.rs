@@ -122,6 +122,10 @@ pub struct AsrConfig {
     pub language: String,
     /// 推理线程数，树莓派 4 建议 4。
     pub threads: u32,
+    /// 解码宽度：1 = 贪心（最快），5 = beam search（更准但明显更慢）。
+    pub beam_size: u32,
+    /// 编码窗口（mel 帧，1500 = 30 秒）。省略则按音频长度自动计算。
+    pub audio_ctx: Option<u32>,
     /// 追加给 whisper.cpp 的参数。
     pub extra_args: Vec<String>,
 }
@@ -247,6 +251,8 @@ impl Default for AsrConfig {
             model: PathBuf::from("./models/ggml-base.bin"),
             language: "zh".into(),
             threads: 4,
+            beam_size: 1,
+            audio_ctx: None,
             extra_args: vec!["--no-prints".into()],
         }
     }

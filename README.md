@@ -170,6 +170,8 @@ cargo run -- --check
 - `audio.input_device` / `output_device`：设备名片段（大小写不敏感），留空用系统默认。
 - `llm.history_limit`：上下文条数，树莓派内存有限，建议 8~16。
 - `tts.length_scale`：小于 1 更快。
+- `asr.beam_size`：默认 1（贪心），改成 5 更准但 Pi 4 上会慢数倍。
+- `asr.audio_ctx`：默认按音频长度自动截断编码窗口；固定成 1500 等于旧行为（最慢）。
 
 ---
 
@@ -184,11 +186,14 @@ WHISPER_MODEL=ggml-tiny.bin ./scripts/fetch-models.sh
 
 树莓派 4 实测参考（4 线程）：
 
-| 模型 | 大小 | 10 秒语音耗时 | 中文准确率 |
+| 模型 | 大小 | Pi 4 短句耗时 | 中文准确率 |
 | --- | --- | --- | --- |
-| `ggml-tiny.bin` | 75 MB | ~1.0s | 偏低，仅适合安静环境 |
-| `ggml-base.bin` | 142 MB | ~2.0s | 日常可用（默认） |
-| `ggml-small.bin` | 466 MB | ~5s | 明显更好，但交互会变慢 |
+| `ggml-tiny.bin` | 75 MB | ~2s | 偏低，仅适合安静环境 |
+| `ggml-base.bin` | 142 MB | ~3s | 日常可用（默认） |
+| `ggml-small.bin` | 466 MB | ~10s+ | 明显更好，但交互会变慢 |
+
+> 这组数字来自 `--audio-ctx` 自动截断 + 贪心解码（默认配置）。
+> 如果按 whisper 的默认值（30 秒编码窗口 + 5 beam），base 在 Pi 4 上要 **15~20 秒**。
 
 ### Piper 语音
 

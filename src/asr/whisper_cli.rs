@@ -16,6 +16,8 @@ pub struct WhisperCli {
     model: PathBuf,
     language: String,
     threads: u32,
+    beam_size: u32,
+    audio_ctx: Option<u32>,
     extra_args: Vec<String>,
     tmp_dir: PathBuf,
 }
@@ -30,6 +32,8 @@ impl WhisperCli {
             model: cfg.model.clone(),
             language: cfg.language.clone(),
             threads: cfg.threads.max(1),
+            beam_size: cfg.beam_size.max(1),
+            audio_ctx: cfg.audio_ctx,
             extra_args: cfg.extra_args.clone(),
             tmp_dir,
         })
@@ -49,6 +53,14 @@ impl WhisperCli {
             .join(format!("utt-{}.wav", uuid::Uuid::new_v4()));
         audio::write_wav_16k(&wav, samples)?;
 
+        // 编码窗口按实际音频长度截断（50 mel 帧/秒，留 96 帧余量）。
+        // whisper 默认总是编码 30 秒，Pi 4 上这一步占了大部分时间。
+        let frames =
+            ((samples.len() as f64 / crate::audio::TARGET_RATE as f64) * 50.0).ceil() as u32;
+        let audio_ctx = self
+            .audio_ctx
+            .unwrap_or_else(|| (frames + 96).clamp(256, 1500));
+
         let output = Command::new(&self.command)
             .arg("-m")
             .arg(&self.model)
@@ -58,6 +70,12 @@ impl WhisperCli {
             .arg(&self.language)
             .arg("-t")
             .arg(self.threads.to_string())
+            .arg("-ac")
+            .arg(audio_ctx.to_string())
+            .arg("-bs")
+            .arg(self.beam_size.to_string())
+            .arg("-bo")
+            .arg(self.beam_size.to_string())
             .arg("-nt")
             .args(&self.extra_args)
             .stdin(Stdio::null())
