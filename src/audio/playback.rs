@@ -310,7 +310,6 @@ fn decode_mp3(path: &Path) -> Result<(Vec<f32>, u32)> {
 
     let mut mono = Vec::new();
     let mut rate = 24_000u32;
-    let mut channels = 1usize;
 
     while let Some(packet) = format.next_packet().context("读取 MP3 数据失败")? {
         if packet.track_id != track_id {
@@ -320,7 +319,7 @@ fn decode_mp3(path: &Path) -> Result<(Vec<f32>, u32)> {
             Ok(buf) => {
                 let spec = buf.spec();
                 rate = spec.rate();
-                channels = spec.channels().count().max(1);
+                let channels = spec.channels().count().max(1);
                 let n = buf.samples_interleaved();
                 let mut interleaved = vec![0f32; n];
                 buf.copy_to_slice_interleaved(&mut interleaved);
