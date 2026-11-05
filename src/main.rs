@@ -44,6 +44,8 @@ async fn main() -> Result<()> {
         tracing::warn!("未设置 TAVILY_API_KEY，搜索工具会失败");
     }
 
+    apply_sink_volume(&cfg);
+
     let cfg = Arc::new(cfg);
 
     let store = Arc::new(memory::Store::open(&cfg.storage.path)?);
@@ -121,6 +123,23 @@ async fn main() -> Result<()> {
 }
 
 /// 文本模式：跳过麦克风，但仍然用真实的 whisper/piper。
+/// 调整系统输出音量。蓝牙音箱没有音量键时，靠这个把音量拉到 100%。
+fn apply_sink_volume(cfg: &Config) {
+    let pct = cfg.audio.sink_volume_percent;
+    // 只在实际会出声（piper）时调整；dev 模式的 mock TTS 不该动系统音量。
+    if pct == 0 || cfg.tts.engine != "piper" {
+        return;
+    }
+    let arg = format!("{pct}%");
+    match std::process::Command::new("pactl")
+        .args(["set-sink-volume", "@DEFAULT_SINK@", &arg])
+        .status()
+    {
+        Ok(status) if status.success() => tracing::info!(volume = %arg, "已设置输出音量"),
+        _ => tracing::debug!("pactl 不可用，跳过音量设置"),
+    }
+}
+
 fn apply_text(cfg: &mut Config) {
     tracing::warn!("文本模式：标准输入 + 真实 ASR/TTS（跳过麦克风）");
     cfg.audio.backend = "stdin".into();

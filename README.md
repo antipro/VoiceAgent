@@ -168,6 +168,9 @@ cargo run -- --check
 - `audio.vad.min_rms`：环境吵就调大（0.006 → 0.012）。
 - `audio.vad.end_silence_ms`：说完整句后等多久收尾，默认 600ms。
 - `audio.input_device` / `output_device`：设备名片段（大小写不敏感），留空用系统默认。
+- `audio.sink_volume_percent`：启动时把系统输出音量设成该百分比（默认 100，0 = 不调整）。
+  蓝牙音箱没有实体音量键、PipeWire 又常常默认只有 30% 左右时，靠它把音量拉满。
+  超过 100 是软件增益，可能削波。
 - `llm.history_limit`：上下文条数，树莓派内存有限，建议 8~16。
 - `tts.length_scale`：小于 1 更快。
 - `tts.comma_pause_ms` / `tts.sentence_pause_ms`：标点后的停顿，默认 120 / 350ms。

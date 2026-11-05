@@ -85,8 +85,11 @@ pub struct AudioConfig {
     pub input_device: Option<String>,
     /// 输出设备名（模糊匹配，留空用系统默认）。
     pub output_device: Option<String>,
-    /// 播放音量倍率。
+    /// 播放音量倍率（软件增益，超过 1.0 会削波）。
     pub playback_volume: f32,
+    /// 启动时把系统输出音量设为该百分比（0 = 不调整）。
+    /// 蓝牙音箱没有实体音量键时，用它避免 PipeWire 默认的 30% 左右音量。
+    pub sink_volume_percent: u32,
     pub vad: VadConfig,
 }
 
@@ -230,6 +233,7 @@ impl Default for AudioConfig {
             input_device: None,
             output_device: None,
             playback_volume: 1.0,
+            sink_volume_percent: 100,
             vad: VadConfig::default(),
         }
     }

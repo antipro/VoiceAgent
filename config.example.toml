@@ -42,6 +42,9 @@ host = "auto"
 # input_device = "pipewire"
 # output_device = "pipewire"
 playback_volume = 1.0
+# 启动时把系统输出音量设为该百分比（0 = 不调整）。
+# 蓝牙音箱没有实体音量键时很有用；PipeWire 默认常常只有 30% 左右。
+sink_volume_percent = 100
 
 # 启用了 AEC 之后，环境噪声和自身回声都被压低，min_rms 可以适当调小；
 # 没启用 AEC 时保持默认，避免把 TTS 的声音当成用户说话。
