@@ -211,7 +211,7 @@ pub fn strip_wake(cfg: &WakeConfig, text: &str) -> Option<String> {
         if w.is_empty() {
             continue;
         }
-        if let Some(rest) = strip_by_pinyin(&norm, &w) {
+        if let Some(rest) = strip_by_pinyin(&norm, &w, cfg.fold_nasal_n) {
             return Some(rest);
         }
     }
@@ -233,13 +233,13 @@ pub fn strip_wake(cfg: &WakeConfig, text: &str) -> Option<String> {
 }
 
 /// 把文本转成无声调拼音，并记录每个字符在拼音串中的字节区间。
-fn pinyin_with_spans(text: &str) -> (String, Vec<(usize, usize)>) {
+fn pinyin_with_spans(text: &str, fold_nasal: bool) -> (String, Vec<(usize, usize)>) {
     let mut out = String::with_capacity(text.len() * 3);
     let mut spans = Vec::with_capacity(text.chars().count());
     for c in text.chars() {
         let start = out.len();
         if let Some(p) = c.to_pinyin() {
-            out.push_str(p.plain());
+            push_syllable(&mut out, p.plain(), fold_nasal);
         } else {
             // 非汉字（数字、字母）原样保留，保证位置能对上。
             for lower in c.to_lowercase() {
@@ -251,12 +251,27 @@ fn pinyin_with_spans(text: &str) -> (String, Vec<(usize, usize)>) {
     (out, spans)
 }
 
+/// 追加一个音节；`fold_nasal` 为真时把后鼻音 -ng 折成前鼻音 -n。
+///
+/// 中文口音里 en/eng、in/ing、an/ang 经常不分（蒙→门、明→民），
+/// 折叠后两边一致，仍然能匹配。
+fn push_syllable(out: &mut String, syllable: &str, fold_nasal: bool) {
+    if fold_nasal {
+        if let Some(stem) = syllable.strip_suffix("ng") {
+            out.push_str(stem);
+            out.push('n');
+            return;
+        }
+    }
+    out.push_str(syllable);
+}
+
 /// 按拼音查找唤醒词，返回去掉它之后的剩余文本。
 ///
 /// 只在命中恰好落在字符边界上时才返回，避免在音节中间误匹配。
-fn strip_by_pinyin(norm: &str, word: &str) -> Option<String> {
-    let (haystack, spans) = pinyin_with_spans(norm);
-    let (needle, _) = pinyin_with_spans(word);
+fn strip_by_pinyin(norm: &str, word: &str, fold_nasal: bool) -> Option<String> {
+    let (haystack, spans) = pinyin_with_spans(norm, fold_nasal);
+    let (needle, _) = pinyin_with_spans(word, fold_nasal);
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;
     }
@@ -395,6 +410,17 @@ mod tests {
         ] {
             assert!(is_wake(&cfg(), variant), "should wake on {variant}");
         }
+    }
+
+    #[test]
+    fn detects_front_back_nasal_confusion() {
+        // 后鼻音说成前鼻音：蒙(meng)→门(men)、明(ming)→民(min)。
+        for variant in ["小门同学", "小民同学", "小蒙同雪"] {
+            assert!(is_wake(&cfg(), variant), "should wake on {variant}");
+        }
+        // 仍然不能误伤正常句子。
+        assert!(!is_wake(&cfg(), "小明的同学来了"));
+        assert!(!is_wake(&cfg(), "明天同学聚会"));
     }
 
     #[test]

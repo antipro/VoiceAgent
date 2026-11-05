@@ -66,6 +66,8 @@ pub struct WakeConfig {
     pub enabled: bool,
     /// 唤醒词列表，命中任意一个即视为唤醒。
     pub words: Vec<String>,
+    /// 拼音匹配时把后鼻音 -ng 折成前鼻音 -n（蒙/门、明/民）。
+    pub fold_nasal_n: bool,
     /// 允许的编辑距离（容错，针对同音误识别）。
     pub fuzzy_max_distance: usize,
     /// 短于该字数的文本不做模糊匹配，避免误唤醒。
@@ -203,6 +205,7 @@ impl Default for WakeConfig {
             ],
             // 拼音匹配已经覆盖同音字；字符级模糊匹配反而会把
             // “小明的同学”判成“小明同学”，默认关掉（0）。
+            fold_nasal_n: true,
             fuzzy_max_distance: 0,
             fuzzy_max_len: 8,
         }
