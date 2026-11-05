@@ -68,7 +68,12 @@ async fn tool_call_round_trip() {
     let agent = Agent::new(&cfg, store.clone()).unwrap();
 
     let reply = agent.respond("session-1", "北京天气怎么样").await.unwrap();
-    assert!(reply.contains("25"), "unexpected reply: {reply}");
+    assert!(
+        reply.text.contains("25"),
+        "unexpected reply: {}",
+        reply.text
+    );
+    assert!(!reply.end_session);
 
     let history = store.recent("session-1", 10).await.unwrap();
     assert_eq!(history.len(), 2);
@@ -111,6 +116,64 @@ async fn persists_user_message_even_without_api_key() {
     let history = store.recent("s", 10).await.unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].role, Role::User.as_str());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn end_conversation_tool_stops_session() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        let mut bodies: Vec<String> = Vec::new();
+        for _ in 0..2 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let (_, body) = read_request(&mut socket).await;
+            bodies.push(body);
+            if bodies.len() == 1 {
+                respond(
+                    &mut socket,
+                    r#"{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_end","type":"function","function":{"name":"end_conversation","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
+                )
+                .await;
+            } else {
+                respond(
+                    &mut socket,
+                    r#"{"choices":[{"message":{"role":"assistant","content":"好的，再见。"},"finish_reason":"stop"}]}"#,
+                )
+                .await;
+            }
+        }
+        bodies
+    });
+
+    let dir = std::env::temp_dir().join(format!("xiaomeng-it-{}", uuid::Uuid::new_v4()));
+    let mut cfg = Config::default();
+    cfg.llm.base_url = format!("http://{addr}");
+    cfg.llm.model = "test-model".into();
+    cfg.llm.api_key = Secret("sk-test".into());
+    cfg.storage.path = dir.join("test.db");
+    cfg.search.provider = "deepseek".into();
+
+    let store = Arc::new(Store::open(&cfg.storage.path).unwrap());
+    let agent = Agent::new(&cfg, store.clone()).unwrap();
+
+    let reply = agent.respond("s", "再见").await.unwrap();
+    assert!(reply.end_session, "model asked to end the session");
+    assert!(reply.text.contains("再见"), "reply: {}", reply.text);
+
+    let bodies = server.await.unwrap();
+    assert!(bodies[0].contains("end_conversation"), "{}", bodies[0]);
+    assert!(
+        bodies[0].contains("web_search"),
+        "both tools must be offered"
+    );
+    assert!(
+        bodies[1].contains("\"tool_call_id\":\"call_end\""),
+        "tool result must be returned: {}",
+        bodies[1]
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

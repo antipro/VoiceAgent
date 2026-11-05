@@ -27,7 +27,11 @@ pub enum Event {
     /// 识别出一句话。
     Heard { text: String },
     /// 一轮问答（含播报）结束。
-    PipelineDone { generation: u64 },
+    PipelineDone {
+        generation: u64,
+        /// 模型调用了 end_conversation，播报完回到 Idle。
+        end_session: bool,
+    },
     /// 唤醒应答播报结束。
     GreetingDone { generation: u64 },
     /// 上游音频链路结束，进程应退出。
@@ -140,10 +144,18 @@ impl Controller {
                 Ok(())
             }
             Event::Heard { text } => self.on_heard(text).await,
-            Event::PipelineDone { generation } => {
+            Event::PipelineDone {
+                generation,
+                end_session,
+            } => {
                 if generation == self.generation {
                     if let State::Busy { session } = self.state.clone() {
-                        self.enter_active(session);
+                        if end_session {
+                            tracing::info!("用户结束对话，回到待命");
+                            self.state = State::Idle;
+                        } else {
+                            self.enter_active(session);
+                        }
                     }
                 }
                 Ok(())
@@ -279,17 +291,26 @@ impl Controller {
                 }
             };
 
+            let mut end_session = false;
             match reply {
                 Ok(reply) => {
-                    tracing::info!(reply = %reply, "回答");
-                    if let Err(e) = speak(&cfg, &tts, &reply, &mut wake_rx, &mut audio_rx).await {
+                    tracing::info!(reply = %reply.text, end_session = reply.end_session, "回答");
+                    end_session = reply.end_session;
+                    if let Err(e) =
+                        speak(&cfg, &tts, &reply.text, &mut wake_rx, &mut audio_rx).await
+                    {
                         tracing::warn!("播报失败: {e:#}");
                     }
                 }
                 Err(e) => tracing::warn!("对话失败: {e:#}"),
             }
 
-            let _ = tx.send(Event::PipelineDone { generation }).await;
+            let _ = tx
+                .send(Event::PipelineDone {
+                    generation,
+                    end_session,
+                })
+                .await;
         });
 
         Ok(())

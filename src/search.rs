@@ -86,8 +86,7 @@ impl Searcher {
         if !self.enabled() {
             return None;
         }
-        // 注意：OpenAI 兼容接口要求 tools 是数组，这里直接返回数组。
-        Some(serde_json::json!([{
+        Some(serde_json::json!({
             "type": "function",
             "function": {
                 "name": "web_search",
@@ -103,7 +102,7 @@ impl Searcher {
                     "required": ["query"]
                 }
             }
-        }]))
+        }))
     }
 
     pub async fn search(&self, query: &str) -> Result<String> {

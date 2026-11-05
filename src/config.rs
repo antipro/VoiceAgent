@@ -51,6 +51,8 @@ pub struct AssistantConfig {
     pub name: String,
     /// 唤醒后立即播报的内容。
     pub greeting: String,
+    /// 模型判断结束后若没有给出告别语，用这句兜底。
+    pub farewell: String,
     /// Active 状态等待用户说话的窗口（秒）。
     pub active_timeout_secs: u64,
     /// 送给大模型的系统提示词。
@@ -179,6 +181,7 @@ impl Default for AssistantConfig {
         Self {
             name: "小蒙同学".into(),
             greeting: "我在".into(),
+            farewell: "好的，再见。".into(),
             active_timeout_secs: 10,
             system_prompt: default_system_prompt(),
         }
@@ -300,7 +303,8 @@ fn default_system_prompt() -> String {
      你通过语音与用户交流，所以回答必须口语化、简短（通常不超过 80 个字）。\n\
      不要使用 Markdown、代码块、列表、表情符号或括号注释，因为回答会被直接朗读出来。\n\
      需要实时资讯、天气、新闻、价格等你不确定的信息时，调用 web_search 工具再作答。\n\
-     如果搜索没有给出可靠结果，就如实说明，不要编造。"
+     如果搜索没有给出可靠结果，就如实说明，不要编造。\n\
+     当用户明确表示要结束对话（例如说再见、拜拜、没事了、先这样）时，调用 end_conversation 工具，并用一句话告别。"
         .into()
 }
 
