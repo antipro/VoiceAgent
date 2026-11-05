@@ -170,6 +170,9 @@ cargo run -- --check
 - `audio.input_device` / `output_device`：设备名片段（大小写不敏感），留空用系统默认。
 - `llm.history_limit`：上下文条数，树莓派内存有限，建议 8~16。
 - `tts.length_scale`：小于 1 更快。
+- `tts.comma_pause_ms` / `tts.sentence_pause_ms`：标点后的停顿，默认 120 / 350ms。
+  Piper 对中文逗号只给 60~80ms，听起来像一口气念完；这里按标点拆段、逐段合成
+  （`--json-input`，模型只加载一次）再拼接，停顿长度完全可控。
 - `asr.beam_size`：默认 1（贪心），改成 5 更准但 Pi 4 上会慢数倍。
 - `asr.audio_ctx`：默认按音频长度自动截断编码窗口；固定成 1500 等于旧行为（最慢）。
 
@@ -198,6 +201,10 @@ WHISPER_MODEL=ggml-tiny.bin ./scripts/fetch-models.sh
 ### Piper 语音
 
 `zh_CN-huayan-medium.onnx` + 同名 `.onnx.json`，`scripts/fetch-models.sh` 会一起下载。
+
+Piper 自带的中文停顿很短（实测逗号只有 60~80ms），所以本项目会把回复按标点拆成小段，
+用一次 `--json-input` 进程逐段合成，再按逗号/句号插入 120/350ms 静音后拼接。
+段数上限 12，过短的片段（「嗯，」）会自动并入下一段。
 
 ---
 

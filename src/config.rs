@@ -144,6 +144,10 @@ pub struct TtsConfig {
     pub speaker: Option<i32>,
     /// 语速：小于 1 更快，大于 1 更慢。
     pub length_scale: f32,
+    /// 逗号/顿号后的停顿，毫秒。
+    pub comma_pause_ms: u32,
+    /// 句号/问号/感叹号后的停顿，毫秒。
+    pub sentence_pause_ms: u32,
     pub extra_args: Vec<String>,
 }
 
@@ -270,6 +274,8 @@ impl Default for TtsConfig {
             config: None,
             speaker: None,
             length_scale: 0.95,
+            comma_pause_ms: 120,
+            sentence_pause_ms: 350,
             extra_args: Vec::new(),
         }
     }

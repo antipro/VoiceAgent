@@ -81,6 +81,10 @@ model = "./models/zh_CN-huayan-medium.onnx"
 # speaker = 0
 # 小于 1 语速更快，大于 1 更慢。
 length_scale = 0.95
+# 标点后的停顿（毫秒）。Piper 自带的逗号停顿只有 60~80ms，
+# 这里按标点拆段合成后补足，句子之间停得更自然。
+comma_pause_ms = 120
+sentence_pause_ms = 350
 extra_args = []
 
 [llm]
