@@ -9,7 +9,8 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::resample::Resampler;
-use super::TARGET_RATE;
+use super::{select_host, TARGET_RATE};
+use crate::config::AudioConfig;
 
 pub struct Capture {
     stop: Arc<AtomicBool>,
@@ -17,13 +18,14 @@ pub struct Capture {
 }
 
 impl Capture {
-    pub fn start(device_name: Option<String>, tx: UnboundedSender<Vec<f32>>) -> Result<Self> {
+    pub fn start(cfg: &AudioConfig, tx: UnboundedSender<Vec<f32>>) -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_inner = stop.clone();
+        let cfg = cfg.clone();
         let thread = std::thread::Builder::new()
             .name("audio-capture".into())
             .spawn(move || {
-                if let Err(e) = run(device_name, tx, stop_inner) {
+                if let Err(e) = run(cfg, tx, stop_inner) {
                     tracing::error!("音频采集失败: {e:#}");
                 }
             })
@@ -44,13 +46,9 @@ impl Drop for Capture {
     }
 }
 
-fn run(
-    device_name: Option<String>,
-    tx: UnboundedSender<Vec<f32>>,
-    stop: Arc<AtomicBool>,
-) -> Result<()> {
-    let host = cpal::default_host();
-    let device = pick_input(&host, device_name.as_deref())?;
+fn run(cfg: AudioConfig, tx: UnboundedSender<Vec<f32>>, stop: Arc<AtomicBool>) -> Result<()> {
+    let host = select_host(&cfg);
+    let device = pick_input(&host, cfg.input_device.as_deref())?;
     let supported = device
         .default_input_config()
         .context("读取默认输入配置失败（检查麦克风是否被占用）")?;

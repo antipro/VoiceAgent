@@ -9,6 +9,48 @@ pub mod vad;
 use anyhow::{Context, Result};
 use std::path::Path;
 
+use crate::config::AudioConfig;
+
+/// 选择音频主机。
+///
+/// Linux 上优先 PulseAudio/PipeWire：用户态就能用，蓝牙音箱、AEC 都走它。
+/// 没有 Pulse 套接字（或配置强制 alsa）时回退到 ALSA。
+pub fn select_host(cfg: &AudioConfig) -> cpal::Host {
+    #[cfg(target_os = "linux")]
+    {
+        let use_pulse = match cfg.host.as_str() {
+            "pulse" | "pulseaudio" | "pipewire" => true,
+            "alsa" => false,
+            _ => pulse_socket().is_some(),
+        };
+        if use_pulse {
+            match cpal::host_from_id(cpal::HostId::PulseAudio) {
+                Ok(host) => {
+                    tracing::info!("音频主机: PulseAudio/PipeWire");
+                    return host;
+                }
+                Err(e) => tracing::warn!("PulseAudio 主机不可用（{e}），回退 ALSA"),
+            }
+        }
+        tracing::info!("音频主机: ALSA");
+    }
+    let _ = cfg;
+    cpal::default_host()
+}
+
+/// `$XDG_RUNTIME_DIR/pulse/native`，或显式设置的 `PULSE_SERVER`。
+#[cfg(target_os = "linux")]
+fn pulse_socket() -> Option<std::path::PathBuf> {
+    if let Ok(server) = std::env::var("PULSE_SERVER") {
+        if !server.trim().is_empty() {
+            return Some(std::path::PathBuf::from(server));
+        }
+    }
+    let runtime = std::env::var("XDG_RUNTIME_DIR").ok()?;
+    let path = std::path::PathBuf::from(runtime).join("pulse/native");
+    path.exists().then_some(path)
+}
+
 /// ASR / VAD 统一使用 16 kHz 单声道。
 pub const TARGET_RATE: u32 = 16_000;
 

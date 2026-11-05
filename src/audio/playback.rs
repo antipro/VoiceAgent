@@ -13,6 +13,8 @@ use std::time::{Duration, Instant as StdInstant};
 use tokio::sync::watch;
 
 use super::resample::Resampler;
+use super::select_host;
+use crate::config::AudioConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlayOutcome {
@@ -23,16 +25,14 @@ pub enum PlayOutcome {
 /// 播放一个 WAV 文件，可被 `wake_rx` / `audio_rx` 的任意一次变更打断。
 pub async fn play_wav(
     path: PathBuf,
-    device_name: Option<String>,
-    volume: f32,
+    audio_cfg: AudioConfig,
     wake_rx: &mut watch::Receiver<u64>,
     audio_rx: &mut watch::Receiver<u64>,
 ) -> Result<PlayOutcome> {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_inner = stop.clone();
-    let mut handle = tokio::task::spawn_blocking(move || {
-        play_blocking(&path, device_name.as_deref(), volume, stop_inner)
-    });
+    let mut handle =
+        tokio::task::spawn_blocking(move || play_blocking(&path, &audio_cfg, stop_inner));
 
     tokio::select! {
         res = &mut handle => {
@@ -50,19 +50,15 @@ pub async fn play_wav(
     Ok(PlayOutcome::Cancelled)
 }
 
-fn play_blocking(
-    path: &Path,
-    device_name: Option<&str>,
-    volume: f32,
-    stop: Arc<AtomicBool>,
-) -> Result<()> {
+fn play_blocking(path: &Path, audio_cfg: &AudioConfig, stop: Arc<AtomicBool>) -> Result<()> {
+    let volume = audio_cfg.playback_volume;
     let (samples, rate) = decode_wav(path)?;
     if samples.is_empty() {
         return Ok(());
     }
 
-    let host = cpal::default_host();
-    let device = pick_output(&host, device_name)?;
+    let host = select_host(audio_cfg);
+    let device = pick_output(&host, audio_cfg.output_device.as_deref())?;
     let supported = device
         .default_output_config()
         .context("读取默认输出配置失败")?;

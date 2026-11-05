@@ -13,6 +13,7 @@ struct Args {
     config: PathBuf,
     check: bool,
     dev: bool,
+    text: bool,
 }
 
 #[tokio::main]
@@ -24,6 +25,9 @@ async fn main() -> Result<()> {
     let mut cfg = Config::load(&args.config)?;
     if args.dev {
         apply_dev(&mut cfg);
+    }
+    if args.text {
+        apply_text(&mut cfg);
     }
 
     if args.check {
@@ -73,7 +77,7 @@ async fn main() -> Result<()> {
         }
         _ => {
             let (pcm_tx, pcm_rx) = mpsc::unbounded_channel();
-            capture = Some(Capture::start(cfg.audio.input_device.clone(), pcm_tx)?);
+            capture = Some(Capture::start(&cfg.audio, pcm_tx)?);
 
             let (seg_tx, seg_rx) = mpsc::channel(4);
             let vad_cfg = cfg.audio.vad.clone();
@@ -105,6 +109,15 @@ async fn main() -> Result<()> {
     result
 }
 
+/// 文本模式：跳过麦克风，但仍然用真实的 whisper/piper。
+fn apply_text(cfg: &mut Config) {
+    tracing::warn!("文本模式：标准输入 + 真实 ASR/TTS（跳过麦克风）");
+    cfg.audio.backend = "stdin".into();
+    if cfg.assistant.active_timeout_secs < 60 {
+        cfg.assistant.active_timeout_secs = 60;
+    }
+}
+
 fn apply_dev(cfg: &mut Config) {
     tracing::warn!("开发模式：标准输入 + mock ASR/TTS（不依赖麦克风与模型）");
     cfg.audio.backend = "stdin".into();
@@ -133,6 +146,7 @@ fn parse_args() -> Args {
         config: PathBuf::from("config.toml"),
         check: false,
         dev: false,
+        text: false,
     };
 
     let mut it = std::env::args().skip(1);
@@ -148,6 +162,7 @@ fn parse_args() -> Args {
             }
             "--check" => args.check = true,
             "--dev" => args.dev = true,
+            "--text" => args.text = true,
             "-h" | "--help" => {
                 print_help();
                 std::process::exit(0);
@@ -169,6 +184,7 @@ fn print_help() {
            -c, --config <PATH>  配置文件路径（默认 ./config.toml）\n  \
                --check          只校验配置与模型文件，然后退出\n  \
                --dev            开发模式：标准输入 + mock ASR/TTS\n  \
+               --text           文本模式：标准输入 + 真实 ASR/TTS（测 TTS/音箱用）\n  \
            -h, --help           显示帮助\n\n\
          环境变量:\n  \
            DEEPSEEK_API_KEY     DeepSeek 密钥（必需）\n  \

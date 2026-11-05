@@ -77,8 +77,10 @@ pub struct WakeConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct AudioConfig {
-    /// `cpal` 走真实声卡；`stdin` 用于在开发机上无麦克风调试。
+    /// `cpal` 走真实声卡；`stdin` 用于无麦克风时手动输入。
     pub backend: String,
+    /// 音频主机：auto（默认，Linux 上优先 PulseAudio/PipeWire）/ alsa / pulse。
+    pub host: String,
     /// 输入设备名（模糊匹配，留空用系统默认）。
     pub input_device: Option<String>,
     /// 输出设备名（模糊匹配，留空用系统默认）。
@@ -220,6 +222,7 @@ impl Default for AudioConfig {
     fn default() -> Self {
         Self {
             backend: "cpal".into(),
+            host: "auto".into(),
             input_device: None,
             output_device: None,
             playback_volume: 1.0,

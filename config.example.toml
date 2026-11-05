@@ -30,8 +30,10 @@ fuzzy_max_distance = 0
 fuzzy_max_len = 8
 
 [audio]
-# cpal：真实声卡；stdin：开发机手动输入。
+# cpal：真实声卡；stdin：手动输入（无麦克风时）。
 backend = "cpal"
+# auto：Linux 上优先 PulseAudio/PipeWire（蓝牙音箱、AEC 都走它）；也可强制 alsa/pulse
+host = "auto"
 # 留空/注释掉 = 系统默认设备。也可以写名称片段，例如 "bluez"、"USB"。
 #
 # 启用 PipeWire（Ubuntu 22.04 + AEC，见 README 6.5）时写 "pipewire"：

@@ -328,14 +328,8 @@ async fn speak(
         return Ok(());
     };
 
-    let outcome = audio::playback::play_wav(
-        path.clone(),
-        cfg.audio.output_device.clone(),
-        cfg.audio.playback_volume,
-        wake_rx,
-        audio_rx,
-    )
-    .await;
+    let outcome =
+        audio::playback::play_wav(path.clone(), cfg.audio.clone(), wake_rx, audio_rx).await;
 
     let _ = tokio::fs::remove_file(&path).await;
     outcome.map(|_| ())
