@@ -1,26 +1,38 @@
 //! piper TTS 封装。
 //!
-//! 中文标点处的停顿很短（实测逗号只有 60~80ms），听起来像一口气念完。
-//! 所以这里按标点把文本拆成小段，用 `--json-input` 在一次进程里逐段合成
-//! （模型只加载一次），再按标点类型插入不同长度的静音拼接成一个 WAV。
+//! 两件事决定了这里的实现：
+//!
+//! 1. **模型加载很贵**（Pi 4 上约 3~4 秒）。所以 piper 以 `--json-input` 常驻，
+//!    启动时加载一次，之后每句话只付推理时间。
+//! 2. **中文标点停顿很短**（实测逗号只有 60~80ms）。所以按标点拆段，
+//!    逐段合成后按标点类型插入静音再拼接。
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::process::{Child, ChildStdin, Command};
+use tokio::sync::Mutex;
 
 use crate::config::TtsConfig;
 
 /// 最多拆成多少段，避免长回复产生过多临时文件。
 const MAX_PIECES: usize = 12;
+/// 单次合成的超时。
+const SYNTH_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 struct Piece {
     text: String,
     /// 这段之后的静音，毫秒。
     pause_ms: u32,
+}
+
+struct PiperProcess {
+    /// 持有子进程句柄；drop 时由 kill_on_drop 结束 piper。
+    _child: Child,
+    stdin: ChildStdin,
 }
 
 pub struct Piper {
@@ -33,6 +45,8 @@ pub struct Piper {
     sentence_pause_ms: u32,
     extra_args: Vec<String>,
     tmp_dir: PathBuf,
+    /// 常驻进程；出错或退出后置空，下次合成时重建。
+    process: Mutex<Option<PiperProcess>>,
 }
 
 impl Piper {
@@ -50,6 +64,7 @@ impl Piper {
             sentence_pause_ms: cfg.sentence_pause_ms,
             extra_args: cfg.extra_args.clone(),
             tmp_dir,
+            process: Mutex::new(None),
         })
     }
 
@@ -57,23 +72,108 @@ impl Piper {
         &self.model
     }
 
+    /// 提前把模型加载好（启动时调用，第一句话就不用等）。
+    ///
+    /// piper 没有「就绪」信号，所以真的合成一个短音节，等它写出文件，
+    /// 这样才能确认模型已经加载完毕。
+    pub async fn warmup(&self) -> Result<()> {
+        let path = self.synth_line("嗯").await?;
+        let _ = tokio::fs::remove_file(&path).await;
+        Ok(())
+    }
+
+    /// 按标点切分，返回 (文本, 该段之后的停顿毫秒)。
+    pub fn pieces(&self, text: &str) -> Vec<(String, u32)> {
+        split_for_speech(text, self.comma_pause_ms, self.sentence_pause_ms)
+            .into_iter()
+            .map(|p| (p.text, p.pause_ms))
+            .collect()
+    }
+
+    /// 合成单独一段（不含停顿）。流式播放时逐段调用。
+    pub async fn synthesize_piece(&self, text: &str) -> Result<PathBuf> {
+        self.synth_line(text).await
+    }
+
     pub async fn synthesize(&self, text: &str) -> Result<PathBuf> {
         if text.trim().is_empty() {
             bail!("TTS 输入为空");
         }
-
-        let pieces = split_for_speech(text, self.comma_pause_ms, self.sentence_pause_ms);
-        match pieces.len() {
-            0 => bail!("TTS 输入没有可朗读内容"),
-            1 => self.synthesize_one(&pieces[0].text).await,
-            _ => self.synthesize_pieces(&pieces).await,
+        let pieces = self.pieces(text);
+        if pieces.is_empty() {
+            bail!("TTS 输入没有可朗读内容");
         }
+        if pieces.len() == 1 {
+            return self.synth_line(&pieces[0].0).await;
+        }
+
+        let id = uuid::Uuid::new_v4();
+        let mut parts: Vec<(PathBuf, u32)> = Vec::with_capacity(pieces.len());
+        for (piece, pause) in &pieces {
+            let path = self.synth_line(piece).await?;
+            // synth_line 生成的是随机文件名，这里保持原样即可。
+            parts.push((path, *pause));
+        }
+        let out = self.tmp_dir.join(format!("tts-{id}.wav"));
+        let result = concat_wavs(&parts, &out);
+        cleanup(&parts).await;
+        result?;
+        Ok(out)
+    }
+
+    /// 让常驻 piper 合成一段，等 WAV 写完后返回路径。
+    async fn synth_line(&self, text: &str) -> Result<PathBuf> {
+        let path = self
+            .tmp_dir
+            .join(format!("tts-{}.wav", uuid::Uuid::new_v4()));
+        let line = serde_json::json!({
+            "text": text,
+            "output_file": path.to_string_lossy(),
+        });
+
+        let mut guard = self.process.lock().await;
+        if guard.is_none() {
+            *guard = Some(self.spawn_process()?);
+        }
+        let proc = guard.as_mut().expect("process just created");
+
+        let write = async {
+            proc.stdin.write_all(line.to_string().as_bytes()).await?;
+            proc.stdin.write_all(b"\n").await?;
+            proc.stdin.flush().await
+        }
+        .await;
+        if let Err(e) = write {
+            *guard = None;
+            return Err(e).context("写入 piper 失败");
+        }
+
+        let deadline = Instant::now() + SYNTH_TIMEOUT;
+        loop {
+            if Instant::now() >= deadline {
+                *guard = None;
+                let _ = tokio::fs::remove_file(&path).await;
+                bail!("piper 合成超时（{}s）", SYNTH_TIMEOUT.as_secs());
+            }
+            if let Ok(meta) = tokio::fs::metadata(&path).await {
+                if meta.len() > 1024 {
+                    // 等文件大小稳定，避免读到写了一半的 WAV。
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    if let Ok(again) = tokio::fs::metadata(&path).await {
+                        if again.len() == meta.len() {
+                            break;
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+        Ok(path)
     }
 
     fn base_command(&self) -> Command {
         let mut cmd = Command::new(&self.command);
         cmd.arg("-m").arg(&self.model);
-        // piper 2023.11.x 用 --length_scale；等于 1.0 时省略，兼容其它版本。
         if (self.length_scale - 1.0).abs() > f32::EPSILON {
             cmd.arg("--length_scale")
                 .arg(format!("{:.2}", self.length_scale));
@@ -84,115 +184,50 @@ impl Piper {
         if let Some(sp) = self.speaker {
             cmd.arg("--speaker").arg(sp.to_string());
         }
-        cmd.args(&self.extra_args)
+        cmd.args(&self.extra_args);
+        cmd
+    }
+
+    fn spawn_process(&self) -> Result<PiperProcess> {
+        let mut cmd = self.base_command();
+        // 每段独立合成，关掉 piper 默认的 0.2s 段尾静音，停顿完全由我们控制。
+        cmd.arg("--sentence_silence")
+            .arg("0")
+            .arg("--json-input")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        cmd
-    }
 
-    async fn synthesize_one(&self, text: &str) -> Result<PathBuf> {
-        let wav = self
-            .tmp_dir
-            .join(format!("tts-{}.wav", uuid::Uuid::new_v4()));
-
-        let mut cmd = self.base_command();
-        cmd.arg("-f").arg(&wav);
         let mut child = cmd.spawn().with_context(|| {
             format!("无法执行 {}（确认 piper 已安装并加入 PATH）", self.command)
         })?;
+        let stdin = child.stdin.take().context("piper stdin 不可用")?;
 
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(text.as_bytes()).await?;
-            // drop 关闭 stdin，piper 才会开始合成。
-        }
-
-        let output = tokio::time::timeout(Duration::from_secs(60), child.wait_with_output()).await;
-        let output = match output {
-            Ok(Ok(o)) => o,
-            Ok(Err(e)) => return Err(e).context("等待 piper 失败"),
-            Err(_) => {
-                let _ = tokio::fs::remove_file(&wav).await;
-                bail!("piper 合成超时（60s）");
-            }
-        };
-
-        if !output.status.success() {
-            let _ = tokio::fs::remove_file(&wav).await;
-            bail!(
-                "piper 退出码 {:?}: {}",
-                output.status.code(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-
-        let meta = tokio::fs::metadata(&wav)
-            .await
-            .with_context(|| format!("piper 未生成音频文件: {}", wav.display()))?;
-        if meta.len() == 0 {
-            bail!("piper 生成了空文件");
-        }
-        Ok(wav)
-    }
-
-    /// 多段合成：一次 piper 进程，模型只加载一次。
-    async fn synthesize_pieces(&self, pieces: &[Piece]) -> Result<PathBuf> {
-        let id = uuid::Uuid::new_v4();
-        let mut parts: Vec<(PathBuf, u32)> = Vec::with_capacity(pieces.len());
-        let mut input = String::with_capacity(pieces.len() * 128);
-
-        for (i, piece) in pieces.iter().enumerate() {
-            let path = self.tmp_dir.join(format!("tts-{id}-{i}.wav"));
-            let line = serde_json::json!({
-                "text": piece.text,
-                "output_file": path.to_string_lossy(),
+        // 必须把 stderr 读掉，否则管道写满会把 piper 卡住。
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(async move {
+                let mut lines = tokio::io::BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::trace!(piper = %line);
+                }
             });
-            input.push_str(&line.to_string());
-            input.push('\n');
-            parts.push((path, piece.pause_ms));
         }
 
-        let out = self.tmp_dir.join(format!("tts-{id}.wav"));
-        let mut cmd = self.base_command();
-        // 每段都是独立合成，Piper 默认还会在段尾加 0.2s 静音；
-        // 关掉它，停顿长度完全由 comma_pause_ms / sentence_pause_ms 决定。
-        cmd.arg("--sentence_silence").arg("0");
-        cmd.arg("--json-input");
-        let mut child = cmd.spawn().with_context(|| {
-            format!("无法执行 {}（确认 piper 已安装并加入 PATH）", self.command)
-        })?;
+        tracing::info!("piper 常驻进程已启动（模型只加载一次）");
+        Ok(PiperProcess {
+            _child: child,
+            stdin,
+        })
+    }
+}
 
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(input.as_bytes()).await?;
+impl Drop for Piper {
+    fn drop(&mut self) {
+        // kill_on_drop 会处理 Child；这里显式说明意图。
+        if let Ok(mut guard) = self.process.try_lock() {
+            guard.take();
         }
-
-        let output = tokio::time::timeout(Duration::from_secs(120), child.wait_with_output()).await;
-        let output = match output {
-            Ok(Ok(o)) => o,
-            Ok(Err(e)) => {
-                cleanup(&parts).await;
-                return Err(e).context("等待 piper 失败");
-            }
-            Err(_) => {
-                cleanup(&parts).await;
-                bail!("piper 合成超时（120s）");
-            }
-        };
-
-        if !output.status.success() {
-            cleanup(&parts).await;
-            bail!(
-                "piper 退出码 {:?}: {}",
-                output.status.code(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-
-        let result = concat_wavs(&parts, &out);
-        cleanup(&parts).await;
-        result?;
-        Ok(out)
     }
 }
 
@@ -325,24 +360,24 @@ mod tests {
 
     #[test]
     fn splits_on_punctuation_with_pauses() {
-        let pieces = split_for_speech("你好呀，我是小蒙同学，有什么可以帮你的吗？", 180, 420);
+        let pieces = split_for_speech("你好呀，我是小蒙同学，有什么可以帮你的吗？", 120, 350);
         assert_eq!(pieces.len(), 3);
         assert_eq!(pieces[0].text, "你好呀，");
-        assert_eq!(pieces[0].pause_ms, 180);
+        assert_eq!(pieces[0].pause_ms, 120);
         assert_eq!(pieces[2].text, "有什么可以帮你的吗？");
         assert_eq!(pieces[2].pause_ms, 0);
     }
 
     #[test]
     fn no_punctuation_is_single_piece() {
-        let pieces = split_for_speech("今天天气不错", 180, 420);
+        let pieces = split_for_speech("今天天气不错", 120, 350);
         assert_eq!(pieces.len(), 1);
         assert_eq!(pieces[0].pause_ms, 0);
     }
 
     #[test]
     fn merges_short_fragments() {
-        let pieces = split_for_speech("嗯，好的。", 180, 420);
+        let pieces = split_for_speech("嗯，好的。", 120, 350);
         assert_eq!(pieces.len(), 1);
         assert_eq!(pieces[0].text, "嗯，好的。");
     }

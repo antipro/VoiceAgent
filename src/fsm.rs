@@ -4,6 +4,7 @@
 //! 通过 `watch` 通道广播“新会话”来取消，避免任何锁。
 
 use anyhow::Result;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
@@ -258,7 +259,7 @@ impl Controller {
         tokio::spawn(async move {
             // 用户紧接着提问时，连合成都该停掉，别白白跑 8 秒 Piper。
             if let Err(e) =
-                speak_cancellable(&cfg, &tts, &greeting, &mut wake_rx, &mut audio_rx).await
+                speak_cancellable(&cfg, tts.clone(), &greeting, &mut wake_rx, &mut audio_rx).await
             {
                 tracing::warn!("播报唤醒应答失败: {e:#}");
             }
@@ -299,9 +300,14 @@ impl Controller {
                 Ok(reply) => {
                     tracing::info!(reply = %reply.text, end_session = reply.end_session, "回答");
                     end_session = reply.end_session;
-                    if let Err(e) =
-                        speak_cancellable(&cfg, &tts, &reply.text, &mut wake_rx, &mut audio_rx)
-                            .await
+                    if let Err(e) = speak_cancellable(
+                        &cfg,
+                        tts.clone(),
+                        &reply.text,
+                        &mut wake_rx,
+                        &mut audio_rx,
+                    )
+                    .await
                     {
                         tracing::warn!("播报失败: {e:#}");
                     }
@@ -324,7 +330,7 @@ impl Controller {
 /// 播报，但允许被「新唤醒 / 新请求」打断——包括打断 TTS 合成阶段。
 async fn speak_cancellable(
     cfg: &Config,
-    tts: &Tts,
+    tts: Arc<Tts>,
     text: &str,
     wake_rx: &mut watch::Receiver<u64>,
     audio_rx: &mut watch::Receiver<u64>,
@@ -346,18 +352,60 @@ async fn speak_cancellable(
 
 async fn speak(
     cfg: &Config,
-    tts: &Tts,
+    tts: Arc<Tts>,
     text: &str,
     wake_rx: &mut watch::Receiver<u64>,
     audio_rx: &mut watch::Receiver<u64>,
 ) -> Result<()> {
-    let Some(path) = tts.synthesize(text).await? else {
-        return Ok(());
-    };
+    let speak_started = std::time::Instant::now();
+    let pieces = tts.pieces(text);
+    if pieces.len() <= 1 {
+        let Some(path) = tts.synthesize(text).await? else {
+            return Ok(());
+        };
+        tracing::info!(ms = speak_started.elapsed().as_millis(), "首段开始播放");
+        let outcome =
+            audio::playback::play_wav(path.clone(), cfg.audio.clone(), wake_rx, audio_rx).await;
+        let _ = tokio::fs::remove_file(&path).await;
+        return outcome.map(|_| ());
+    }
 
-    let outcome =
-        audio::playback::play_wav(path.clone(), cfg.audio.clone(), wake_rx, audio_rx).await;
+    // 边合成边播：第一段合成完就开始放，后面的段在播放期间合成。
+    let (tx, mut rx) = mpsc::channel::<(PathBuf, u32)>(2);
+    let producer = tts.clone();
+    let list = pieces.clone();
+    tokio::spawn(async move {
+        for (piece, pause) in list {
+            match producer.synthesize_piece(&piece).await {
+                Ok(path) => {
+                    if tx.send((path, pause)).await.is_err() {
+                        return;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("分段合成失败: {e:#}");
+                    return;
+                }
+            }
+        }
+    });
 
-    let _ = tokio::fs::remove_file(&path).await;
-    outcome.map(|_| ())
+    let mut first = true;
+    while let Some((path, pause)) = rx.recv().await {
+        if first {
+            tracing::info!(ms = speak_started.elapsed().as_millis(), "首段开始播放");
+            first = false;
+        }
+        let outcome =
+            audio::playback::play_wav(path.clone(), cfg.audio.clone(), wake_rx, audio_rx).await;
+        let _ = tokio::fs::remove_file(&path).await;
+        match outcome? {
+            audio::playback::PlayOutcome::Cancelled => return Ok(()),
+            audio::playback::PlayOutcome::Played => {}
+        }
+        if pause > 0 {
+            tokio::time::sleep(Duration::from_millis(pause as u64)).await;
+        }
+    }
+    Ok(())
 }

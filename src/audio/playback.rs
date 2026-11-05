@@ -195,7 +195,7 @@ fn play_blocking(path: &Path, audio_cfg: &AudioConfig, stop: Arc<AtomicBool>) ->
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    tracing::info!(reason, "播放结束");
+    tracing::debug!(reason, "播放结束");
     Ok(())
 }
 

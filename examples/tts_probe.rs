@@ -26,9 +26,21 @@ async fn main() -> Result<()> {
     println!("引擎: {}", tts.describe());
     println!("文本: {text}");
 
+    let warm = std::time::Instant::now();
+    tts.warmup().await?;
+    println!("预热（模型加载）: {}ms", warm.elapsed().as_millis());
+
     let started = std::time::Instant::now();
     let path = tts.synthesize(&text).await?;
     let elapsed = started.elapsed().as_millis();
+
+    // 第二句：常驻进程已就绪，这才是真实的首句延迟。
+    let again = std::time::Instant::now();
+    let second = tts.synthesize(&text).await?;
+    println!("第二句合成: {}ms", again.elapsed().as_millis());
+    if let Some(p) = &second {
+        let _ = std::fs::remove_file(p);
+    }
 
     match path {
         None => println!("mock 引擎，没有生成音频（耗时 {elapsed}ms）"),

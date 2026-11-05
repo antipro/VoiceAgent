@@ -55,6 +55,17 @@ async fn main() -> Result<()> {
 
     let agent = Arc::new(agent::Agent::new(&cfg, store.clone())?);
     let tts = Arc::new(tts::Tts::from_config(&cfg.tts)?);
+    // 后台预热，不阻塞启动：模型加载要几秒，没必要让提示符等它。
+    {
+        let warm = tts.clone();
+        tokio::spawn(async move {
+            if let Err(e) = warm.warmup().await {
+                tracing::warn!("TTS 预热失败（首次播报会慢一些）: {e:#}");
+            } else {
+                tracing::info!("TTS 模型已加载");
+            }
+        });
+    }
     tracing::info!(
         asr = %cfg.asr.engine,
         tts = %tts.describe(),
