@@ -12,6 +12,7 @@ chrono = { version = "0.4.45", features = ["serde"] }
 cpal = "0.18.2"
 dotenvy = "0.15.7"
 hound = "3.5.1"
+pinyin = { version = "0.11.0", default-features = false, features = ["plain"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 rustyline = "15"

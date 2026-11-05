@@ -3,6 +3,8 @@
 //! whisper 对静音/噪声经常输出固定的“幻听”文本（例如“字幕由 XX 提供”），
 //! 这里统一过滤，避免它们在 Idle 状态触发误判。
 
+use pinyin::ToPinyin;
+
 use crate::config::WakeConfig;
 
 /// 常见幻觉文本（归一化后比较）。
@@ -190,7 +192,7 @@ pub fn strip_wake(cfg: &WakeConfig, text: &str) -> Option<String> {
         return None;
     }
 
-    // 精确命中优先：能定位就能把剩下的内容摘出来。
+    // ① 精确命中：能定位就能把剩下的内容摘出来。
     for word in &cfg.words {
         let w = normalize(word);
         if w.is_empty() {
@@ -202,7 +204,19 @@ pub fn strip_wake(cfg: &WakeConfig, text: &str) -> Option<String> {
         }
     }
 
-    // 模糊匹配：只知道命中了，无法安全定位，整句当作唤醒。
+    // ② 同音字命中：小蒙 / 小萌 / 小梦 / 筱蒙 / 晓蒙 的拼音完全相同。
+    //    whisper 每次可能写出不同的字，按拼音比对才稳定。
+    for word in &cfg.words {
+        let w = normalize(word);
+        if w.is_empty() {
+            continue;
+        }
+        if let Some(rest) = strip_by_pinyin(&norm, &w) {
+            return Some(rest);
+        }
+    }
+
+    // ③ 模糊匹配：只知道命中了，无法安全定位，整句当作唤醒。
     let chars: Vec<char> = norm.chars().collect();
     if chars.len() <= cfg.fuzzy_max_len {
         for word in &cfg.words {
@@ -216,6 +230,51 @@ pub fn strip_wake(cfg: &WakeConfig, text: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// 把文本转成无声调拼音，并记录每个字符在拼音串中的字节区间。
+fn pinyin_with_spans(text: &str) -> (String, Vec<(usize, usize)>) {
+    let mut out = String::with_capacity(text.len() * 3);
+    let mut spans = Vec::with_capacity(text.chars().count());
+    for c in text.chars() {
+        let start = out.len();
+        if let Some(p) = c.to_pinyin() {
+            out.push_str(p.plain());
+        } else {
+            // 非汉字（数字、字母）原样保留，保证位置能对上。
+            for lower in c.to_lowercase() {
+                out.push(lower);
+            }
+        }
+        spans.push((start, out.len()));
+    }
+    (out, spans)
+}
+
+/// 按拼音查找唤醒词，返回去掉它之后的剩余文本。
+///
+/// 只在命中恰好落在字符边界上时才返回，避免在音节中间误匹配。
+fn strip_by_pinyin(norm: &str, word: &str) -> Option<String> {
+    let (haystack, spans) = pinyin_with_spans(norm);
+    let (needle, _) = pinyin_with_spans(word);
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+
+    let pos = haystack.find(&needle)?;
+    let end = pos + needle.len();
+
+    // 匹配起点/终点必须对应字符边界。
+    let start_idx = spans.iter().position(|(s, _)| *s == pos)?;
+    let end_idx = spans.iter().position(|(_, e)| *e == end)?;
+
+    let rest: String = norm
+        .chars()
+        .enumerate()
+        .filter(|(i, _)| *i < start_idx || *i > end_idx)
+        .map(|(_, c)| c)
+        .collect();
+    Some(rest)
 }
 
 /// 在 `text` 中滑动长度接近 `word` 的窗口，返回最小编辑距离。
@@ -320,6 +379,45 @@ mod tests {
         );
         assert_eq!(strip_wake(&cfg(), "小蒙同学。").as_deref(), Some(""));
         assert_eq!(strip_wake(&cfg(), "今天天气怎么样"), None);
+    }
+
+    #[test]
+    fn detects_homophones_by_pinyin() {
+        // whisper 对同一段发音可能写出不同的字；拼音相同就应当唤醒。
+        for variant in [
+            "小蒙同学",
+            "小萌同学",
+            "小梦同学",
+            "筱蒙同学",
+            "晓蒙同学",
+            "肖蒙同学",
+            "小檬同学",
+        ] {
+            assert!(is_wake(&cfg(), variant), "should wake on {variant}");
+        }
+    }
+
+    #[test]
+    fn strips_homophone_wake_word_and_keeps_question() {
+        assert_eq!(
+            strip_wake(&cfg(), "筱蒙同学，今天天气怎么样？").as_deref(),
+            Some("今天天气怎么样")
+        );
+    }
+
+    #[test]
+    fn pinyin_matching_does_not_fire_on_similar_sentences() {
+        // 发音不同，不能误唤醒。
+        for sentence in [
+            "小明的同学来了",
+            "明天同学聚会",
+            "笑蒙了",
+            "今天天气怎么样",
+        ] {
+            let expected = is_wake(&cfg(), sentence);
+            // 只有包含完整唤醒词发音的句子才允许为真；这里全部应为否。
+            assert!(!expected, "should not wake on {sentence}");
+        }
     }
 
     #[test]

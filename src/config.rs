@@ -192,18 +192,18 @@ impl Default for WakeConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            // 四字比「小蒙」更不容易误唤醒（“笑蒙了”“小蒙圈”发音相同）。
+            // 同音写法（小萌/筱蒙/晓蒙）由拼音匹配自动覆盖，不必逐个列出。
             words: vec![
                 "小蒙同学".into(),
-                "小蒙".into(),
-                "小萌同学".into(),
-                "小萌".into(),
                 "小明同学".into(),
                 // whisper 常输出繁体，这里保留一份，双保险。
                 "小蒙同學".into(),
-                "小萌同學".into(),
                 "小明同學".into(),
             ],
-            fuzzy_max_distance: 1,
+            // 拼音匹配已经覆盖同音字；字符级模糊匹配反而会把
+            // “小明的同学”判成“小明同学”，默认关掉（0）。
+            fuzzy_max_distance: 0,
             fuzzy_max_len: 8,
         }
     }

@@ -190,7 +190,7 @@ system_prompt = """
 
 [wake]
 enabled = true
-words = ["小蒙同学", "小蒙", "小萌同学", "小萌", "小明同学"]
+words = ["小蒙同学", "小明同学"]
 
 [audio]
 backend = "cpal"
